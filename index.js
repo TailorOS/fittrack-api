@@ -100,7 +100,7 @@ async function executeUpdateProfile(userId, args) {
   const { data, error } = await supabase
     .from('profiles')
     .update({ [field]: updateValue })
-    .eq('user_id', userId)
+    .eq('id', userId)
     .select()
     .single()
 
@@ -131,10 +131,22 @@ async function executeRegeneratePlan(userId, args) {
   const { data: profile, error: profileError } = await supabase
     .from('profiles')
     .select('*')
-    .eq('user_id', userId)
+    .eq('id', userId)
     .single()
 
   if (profileError || !profile) throw new Error('Could not fetch user profile for plan regeneration')
+
+  // Apply fallbacks for missing/null profile fields
+  profile.age = profile.age || 25
+  profile.gender = profile.gender || 'male'
+  profile.weight = profile.weight || 150
+  profile.height = profile.height || '5\'10"'
+  profile.activity_level = profile.activity_level || 'moderately_active'
+  profile.diet_type = profile.diet_type || 'balanced'
+  profile.experience_level = profile.experience_level || 'intermediate'
+  profile.training_days_per_week = profile.training_days_per_week || 4
+  profile.goal = profile.goal || 'lean muscle'
+  profile.full_name = profile.full_name || 'there'
 
   // Deactivate existing plans
   if (plan_type === 'workout' || plan_type === 'both') {
@@ -273,8 +285,8 @@ app.post('/api/generate-plan', async (req, res) => {
     // Fetch full profile from Supabase
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('full_name, age, gender, weight, height, goal, experience_level, activity_level, diet_type, training_days_per_week')
-      .eq('user_id', userId)
+      .select('*')
+      .eq('id', userId)
       .single()
 
     console.log(`[generate-plan] Profile fetched: ${profile ? 'yes' : 'no'}${profileError ? ', error: ' + profileError.message : ''}`)
@@ -283,13 +295,17 @@ app.post('/api/generate-plan', async (req, res) => {
       return res.status(404).json({ error: 'Profile not found for this user' })
     }
 
-    // Validate critical fields
-    const criticalFields = ['weight', 'age', 'height', 'goal']
-    const missingFields = criticalFields.filter(f => profile[f] == null || profile[f] === '')
-    if (missingFields.length > 0) {
-      console.log(`[generate-plan] Incomplete profile, missing: ${missingFields.join(', ')}`)
-      return res.status(400).json({ error: 'incomplete_profile', missing_fields: missingFields })
-    }
+    // Apply fallbacks for missing/null profile fields
+    profile.age = profile.age || 25
+    profile.gender = profile.gender || 'male'
+    profile.weight = profile.weight || 150
+    profile.height = profile.height || '5\'10"'
+    profile.activity_level = profile.activity_level || 'moderately_active'
+    profile.diet_type = profile.diet_type || 'balanced'
+    profile.experience_level = profile.experience_level || 'intermediate'
+    profile.training_days_per_week = profile.training_days_per_week || 4
+    profile.goal = profile.goal || 'lean muscle'
+    profile.full_name = profile.full_name || 'there'
 
     // Deactivate existing active plans
     await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
