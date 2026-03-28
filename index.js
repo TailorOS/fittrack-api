@@ -4,9 +4,22 @@ const cors = require('cors')
 const OpenAI = require('openai')
 const { createClient } = require('@supabase/supabase-js')
 
+// Startup env var check
+const requiredEnvVars = ['OPENAI_API_KEY', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY']
+requiredEnvVars.forEach(v => {
+  if (!process.env[v]) console.error(`MISSING ENV VAR: ${v}`)
+})
+
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// Request timeout middleware — 120s to allow GPT-4o to complete
+app.use((req, res, next) => {
+  req.setTimeout(120000)
+  res.setTimeout(120000)
+  next()
+})
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 const supabase = createClient(
@@ -14,8 +27,13 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
 )
 
+// Root health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+})
+
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'FitTrack API v2' })
+  res.json({ status: 'ok', service: 'FitTrack API v2', timestamp: new Date().toISOString() })
 })
 
 // =============================================
@@ -246,6 +264,7 @@ Keep responses to 2-4 sentences unless asked for detail. Be direct like a real c
 app.post('/api/generate-plan', async (req, res) => {
   try {
     const { userId } = req.body
+    console.log(`[generate-plan] Starting for userId: ${userId}`)
 
     if (!userId) {
       return res.status(400).json({ error: 'userId is required' })
@@ -258,6 +277,8 @@ app.post('/api/generate-plan', async (req, res) => {
       .eq('user_id', userId)
       .single()
 
+    console.log(`[generate-plan] Profile fetched: ${profile ? 'yes' : 'no'}${profileError ? ', error: ' + profileError.message : ''}`)
+
     if (profileError || !profile) {
       return res.status(404).json({ error: 'Profile not found for this user' })
     }
@@ -266,19 +287,24 @@ app.post('/api/generate-plan', async (req, res) => {
     const criticalFields = ['weight', 'age', 'height', 'goal']
     const missingFields = criticalFields.filter(f => profile[f] == null || profile[f] === '')
     if (missingFields.length > 0) {
+      console.log(`[generate-plan] Incomplete profile, missing: ${missingFields.join(', ')}`)
       return res.status(400).json({ error: 'incomplete_profile', missing_fields: missingFields })
     }
 
     // Deactivate existing active plans
     await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
     await supabase.from('meal_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+    console.log(`[generate-plan] Deactivated existing plans`)
 
     await generateAndSavePlan(userId, profile, 'both')
 
+    console.log(`[generate-plan] Complete`)
     res.json({ success: true, message: 'Plan generated and saved' })
   } catch (error) {
-    console.error('Generate plan error:', error)
-    res.status(500).json({ error: 'Plan generation failed. Please try again.' })
+    console.error('[generate-plan] Error:', error.message || error)
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Plan generation failed. Please try again.', details: error.message })
+    }
   }
 })
 
@@ -380,6 +406,8 @@ Return ONLY valid JSON with this exact structure:
   }` : ''}
 }
 
+CRITICAL: Return ONLY valid JSON, no markdown, no explanation, no code fences.
+
 Rules:
 ${generateWorkout ? `- Create EXACTLY ${trainingDays} training days + ${7 - trainingDays} rest days = 7 total days
 - Rest days have empty exercises array and dayName should include "Rest"
@@ -389,12 +417,13 @@ ${generateWorkout ? `- Create EXACTLY ${trainingDays} training days + ${7 - trai
   - Intermediate: 4-5 exercises per day, 3-4 sets
   - Advanced: 5-6 exercises per day, 4-5 sets` : ''}
 ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using the TDEE formula above — do NOT use placeholder values
-- Create 7 meal plan days with 4-5 meals each
+- Create 7 meal plan days with 3 meals each (breakfast, lunch, dinner)
 - Diet type is "${diet_type || 'omnivore'}" — only include appropriate foods
 - If vegetarian/vegan, absolutely no meat/fish
-- Each meal must have realistic calorie and macro values that sum to the daily targets` : ''}
-- Return ONLY the JSON, no explanation`
+- Each meal must have realistic calorie and macro values that sum to the daily targets
+- Keep meal instructions to one sentence` : ''}`
 
+  console.log(`[generate-plan] Sending prompt to GPT-4o (planType: ${planType})`)
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [{ role: 'user', content: prompt }],
@@ -403,7 +432,16 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
     response_format: { type: 'json_object' },
   })
 
-  const planData = JSON.parse(completion.choices[0].message.content)
+  const rawContent = completion.choices[0].message.content
+  console.log(`[generate-plan] GPT response received, length: ${rawContent ? rawContent.length : 0}`)
+
+  let planData
+  try {
+    planData = JSON.parse(rawContent)
+  } catch (parseError) {
+    console.error('[generate-plan] Failed to parse GPT response as JSON:', rawContent?.substring(0, 500))
+    throw new Error(`GPT returned invalid JSON: ${parseError.message}`)
+  }
 
   // Save workout plan
   if (generateWorkout && planData.workoutPlan) {
@@ -419,6 +457,7 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
       .single()
 
     if (wpError) throw new Error(`Failed to save workout plan: ${wpError.message}`)
+    console.log(`[generate-plan] Saved workout plan: ${workoutPlan.id}`)
 
     for (const day of planData.workoutPlan.days) {
       const { data: workoutDay, error: wdError } = await supabase
@@ -504,6 +543,7 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
       .single()
 
     if (mpError) throw new Error(`Failed to save meal plan: ${mpError.message}`)
+    console.log(`[generate-plan] Saved meal plan: ${mealPlan.id}`)
 
     for (const day of planData.mealPlan.days) {
       const { data: planDay, error: pdError } = await supabase
