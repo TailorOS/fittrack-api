@@ -19,45 +19,223 @@ app.get('/health', (req, res) => {
 })
 
 // =============================================
-// AI CHAT — Personal trainer for any user
+// CHAT TOOLS — OpenAI function calling definitions
+// =============================================
+const chatTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'update_profile',
+      description: "Update the user's profile data (weight, goal, training days, etc.)",
+      parameters: {
+        type: 'object',
+        properties: {
+          field: {
+            type: 'string',
+            enum: ['weight', 'goal', 'experience_level', 'activity_level', 'training_days_per_week', 'diet_type', 'age', 'height'],
+          },
+          value: { type: 'string' },
+        },
+        required: ['field', 'value'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'log_body_composition',
+      description: "Log the user's current weight, body fat percentage, or muscle mass",
+      parameters: {
+        type: 'object',
+        properties: {
+          weight: { type: 'number' },
+          body_fat_percentage: { type: 'number' },
+          muscle_mass: { type: 'number' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'regenerate_plan',
+      description: "Generate a new workout or meal plan for the user based on their current profile",
+      parameters: {
+        type: 'object',
+        properties: {
+          plan_type: { type: 'string', enum: ['workout', 'meal', 'both'] },
+        },
+        required: ['plan_type'],
+      },
+    },
+  },
+]
+
+// =============================================
+// CHAT TOOL EXECUTORS
+// =============================================
+async function executeUpdateProfile(userId, args) {
+  const { field, value } = args
+  const numericFields = ['weight', 'age', 'training_days_per_week']
+  const updateValue = numericFields.includes(field) ? Number(value) : value
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({ [field]: updateValue })
+    .eq('user_id', userId)
+    .select()
+    .single()
+
+  if (error) throw new Error(`Failed to update profile: ${error.message}`)
+  return { success: true, field, value: updateValue }
+}
+
+async function executeLogBodyComposition(userId, args) {
+  const logEntry = { user_id: userId, logged_at: new Date().toISOString() }
+  if (args.weight != null) logEntry.weight = args.weight
+  if (args.body_fat_percentage != null) logEntry.body_fat_percentage = args.body_fat_percentage
+  if (args.muscle_mass != null) logEntry.muscle_mass = args.muscle_mass
+
+  const { data, error } = await supabase
+    .from('body_composition_logs')
+    .insert(logEntry)
+    .select()
+    .single()
+
+  if (error) throw new Error(`Failed to log body composition: ${error.message}`)
+  return { success: true, logged: logEntry }
+}
+
+async function executeRegeneratePlan(userId, args) {
+  const { plan_type } = args
+
+  // Fetch current profile
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('user_id', userId)
+    .single()
+
+  if (profileError || !profile) throw new Error('Could not fetch user profile for plan regeneration')
+
+  // Deactivate existing plans
+  if (plan_type === 'workout' || plan_type === 'both') {
+    await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+  }
+  if (plan_type === 'meal' || plan_type === 'both') {
+    await supabase.from('meal_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+  }
+
+  // Generate new plan using the same logic as /api/generate-plan
+  await generateAndSavePlan(userId, profile, plan_type)
+  return { success: true, plan_type, message: `New ${plan_type} plan generated` }
+}
+
+// =============================================
+// AI CHAT — Personal trainer with function calling
 // =============================================
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, context } = req.body
+    const { message, userId, profileSnapshot, conversationHistory } = req.body
 
-    const systemPrompt = `You are FitTrack AI, a personal fitness coach.
+    if (!message || !userId) {
+      return res.status(400).json({ error: 'message and userId are required' })
+    }
 
-USER PROFILE:
-- Name: ${context?.name || 'User'}
-- Weight: ${context?.weight || 'unknown'} lbs
-- Body fat: ${context?.bodyFat || 'unknown'}%
-- Goal: ${context?.goal || 'improve fitness'}
-- Training: ${context?.trainingDays || 3} days/week
-- Current streak: ${context?.streak || 0} days
+    const p = profileSnapshot || {}
+    const systemPrompt = `You are ${p.name || 'the user'}'s personal AI fitness trainer. Here's everything you know about them:
+- Age: ${p.age || 'unknown'}, Gender: ${p.gender || 'unknown'}, Weight: ${p.weight || 'unknown'}lbs, Height: ${p.height || 'unknown'}
+- Goal: ${p.goal || 'unknown'}, Experience: ${p.experienceLevel || 'unknown'}, Activity: ${p.activityLevel || 'unknown'}
+- Diet: ${p.dietType || 'unknown'}, Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
 
-TODAY'S WORKOUT: ${context?.todayWorkout || 'Not logged yet'}
-PROTEIN TODAY: ${context?.proteinToday || 0}g of ${context?.proteinTarget || 120}g target
+You can update their profile, log body measurements, and regenerate their plans. Always be encouraging, specific, and personalized. Never be generic.
 
-YOUR STYLE:
-- Direct, no fluff, like a real coach
-- Reference their actual numbers
-- Keep responses to 2-4 sentences unless asked for detail
-- Be encouraging but honest`
+When the user mentions a new weight, body fat, or muscle mass measurement, use log_body_composition to record it.
+When the user wants to change a profile field (weight, goal, training days, etc.), use update_profile.
+When the user asks for a new plan, use regenerate_plan.
+Keep responses to 2-4 sentences unless asked for detail. Be direct like a real coach.`
 
-    const completion = await openai.chat.completions.create({
+    const messages = [{ role: 'system', content: systemPrompt }]
+
+    // Include conversation history if provided
+    if (Array.isArray(conversationHistory)) {
+      for (const msg of conversationHistory.slice(-10)) {
+        messages.push({ role: msg.role, content: msg.content })
+      }
+    }
+
+    messages.push({ role: 'user', content: message })
+
+    // First call — may return tool calls
+    let completion = await openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: message }
-      ],
-      max_tokens: 300,
+      messages,
+      tools: chatTools,
+      tool_choice: 'auto',
+      max_tokens: 500,
       temperature: 0.7,
     })
 
-    res.json({ reply: completion.choices[0].message.content })
+    let assistantMessage = completion.choices[0].message
+    let action = null
+
+    // Handle tool calls (loop to support multiple sequential calls)
+    while (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      messages.push(assistantMessage)
+
+      for (const toolCall of assistantMessage.tool_calls) {
+        const fnName = toolCall.function.name
+        const fnArgs = JSON.parse(toolCall.function.arguments)
+        let result
+
+        try {
+          switch (fnName) {
+            case 'update_profile':
+              result = await executeUpdateProfile(userId, fnArgs)
+              action = { type: 'profile_updated', field: fnArgs.field, value: fnArgs.value }
+              break
+            case 'log_body_composition':
+              result = await executeLogBodyComposition(userId, fnArgs)
+              action = { type: 'composition_logged' }
+              break
+            case 'regenerate_plan':
+              result = await executeRegeneratePlan(userId, fnArgs)
+              action = { type: 'plan_regenerated', plan_type: fnArgs.plan_type }
+              break
+            default:
+              result = { error: `Unknown function: ${fnName}` }
+          }
+        } catch (fnError) {
+          result = { error: fnError.message }
+        }
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        })
+      }
+
+      // Get follow-up response from GPT-4o with tool results
+      completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages,
+        tools: chatTools,
+        tool_choice: 'auto',
+        max_tokens: 500,
+        temperature: 0.7,
+      })
+
+      assistantMessage = completion.choices[0].message
+    }
+
+    const response = { message: assistantMessage.content }
+    if (action) response.action = action
+
+    res.json(response)
   } catch (error) {
     console.error('Chat error:', error)
-    res.status(500).json({ error: error.message })
+    res.status(500).json({ error: 'Chat failed. Please try again.' })
   }
 })
 
@@ -67,37 +245,129 @@ YOUR STYLE:
 // =============================================
 app.post('/api/generate-plan', async (req, res) => {
   try {
-    const { userId, goal, activityLevel, trainingDays, dietType, weightLbs, heightCm, name } = req.body
+    const { userId } = req.body
 
-    // Build the prompt for GPT-4o
-    const prompt = `Create a fitness plan for this person:
-Name: ${name}
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' })
+    }
+
+    // Fetch full profile from Supabase
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('full_name, age, gender, weight, height, goal, experience_level, activity_level, diet_type, training_days_per_week')
+      .eq('user_id', userId)
+      .single()
+
+    if (profileError || !profile) {
+      return res.status(404).json({ error: 'Profile not found for this user' })
+    }
+
+    // Validate critical fields
+    const criticalFields = ['weight', 'age', 'height', 'goal']
+    const missingFields = criticalFields.filter(f => profile[f] == null || profile[f] === '')
+    if (missingFields.length > 0) {
+      return res.status(400).json({ error: 'incomplete_profile', missing_fields: missingFields })
+    }
+
+    // Deactivate existing active plans
+    await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+    await supabase.from('meal_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+
+    await generateAndSavePlan(userId, profile, 'both')
+
+    res.json({ success: true, message: 'Plan generated and saved' })
+  } catch (error) {
+    console.error('Generate plan error:', error)
+    res.status(500).json({ error: 'Plan generation failed. Please try again.' })
+  }
+})
+
+// =============================================
+// CORE PLAN GENERATION LOGIC
+// =============================================
+async function generateAndSavePlan(userId, profile, planType) {
+  const {
+    full_name, age, gender, weight, height,
+    goal, experience_level, activity_level,
+    diet_type, training_days_per_week
+  } = profile
+
+  const trainingDays = training_days_per_week || 4
+
+  // Fetch available exercises from Supabase
+  const { data: availableExercises } = await supabase
+    .from('exercises')
+    .select('id, name, muscle_group, equipment')
+    .order('name')
+
+  const exerciseList = (availableExercises || [])
+    .map(e => `- ID:${e.id} "${e.name}" (${e.muscle_group || 'general'}${e.equipment ? ', ' + e.equipment : ''})`)
+    .join('\n')
+
+  // TDEE and macro calculation instructions
+  const tdeeInstructions = `
+CALORIE CALCULATION (MUST follow these steps):
+1. Calculate BMR using Mifflin-St Jeor:
+   - Male: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) + 5
+   - Female: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) − 161
+   - User weight: ${weight}lbs (=${Math.round(weight * 0.453592)}kg), height: ${height}cm, age: ${age}, gender: ${gender || 'male'}
+2. Multiply BMR by activity factor:
+   - Sedentary: ×1.2, Lightly active: ×1.375, Moderately active: ×1.55, Very active: ×1.725
+   - User activity level: ${activity_level || 'moderately active'}
+3. Adjust for goal:
+   - ${goal === 'build_muscle' || goal === 'lean_muscle' ? 'Muscle building: add +300 calories (lean surplus)' : ''}
+   - ${goal === 'lose_fat' || goal === 'weight_loss' ? 'Fat loss: subtract -500 calories (moderate deficit)' : ''}
+   - ${goal !== 'build_muscle' && goal !== 'lean_muscle' && goal !== 'lose_fat' && goal !== 'weight_loss' ? 'Maintenance: use TDEE as-is' : ''}
+
+MACRO SPLIT (MUST match goal):
+${goal === 'build_muscle' || goal === 'lean_muscle'
+    ? '- Protein: 40% of calories, Carbs: 30%, Fat: 30%'
+    : goal === 'lose_fat' || goal === 'weight_loss'
+      ? '- Protein: 40% of calories, Carbs: 35%, Fat: 25%'
+      : '- Protein: 30% of calories, Carbs: 40%, Fat: 30%'}
+`
+
+  const generateWorkout = planType === 'workout' || planType === 'both'
+  const generateMeal = planType === 'meal' || planType === 'both'
+
+  const prompt = `Create a personalized fitness plan for this person:
+Name: ${full_name || 'User'}
+Age: ${age}, Gender: ${gender || 'not specified'}
+Weight: ${weight} lbs (${Math.round(weight * 0.453592)} kg)
+Height: ${height} cm
 Goal: ${goal}
-Activity Level: ${activityLevel}
+Experience Level: ${experience_level || 'beginner'}
+Activity Level: ${activity_level || 'moderately active'}
 Training Days Per Week: ${trainingDays}
-Diet Type: ${dietType}
-Weight: ${weightLbs || 'unknown'} lbs
-Height: ${heightCm || 'unknown'} cm
+Diet Type: ${diet_type || 'omnivore'}
+
+${tdeeInstructions}
+
+${exerciseList.length > 0 ? `AVAILABLE EXERCISES (you MUST use exercise IDs from this list when possible):
+${exerciseList}
+
+For each exercise in the workout, include the "exerciseId" field with the matching ID from the list above. Only create exercises without an ID if no suitable match exists.` : ''}
 
 Return ONLY valid JSON with this exact structure:
 {
-  "workoutPlan": {
-    "name": "plan name",
+  ${generateWorkout ? `"workoutPlan": {
+    "name": "plan name based on goal and experience",
     "days": [
       {
         "dayNumber": 1,
-        "dayName": "Day name",
-        "muscleGroups": ["muscle1", "muscle2"],
+        "dayName": "Day name (e.g., Push Day, Upper Body, Rest)",
+        "muscleGroups": ["chest", "shoulders", "triceps"],
         "exercises": [
-          {"name": "Exercise name", "sets": 3, "reps": "8-12", "restSeconds": 90}
+          {"name": "Exercise name", ${exerciseList.length > 0 ? '"exerciseId": "uuid-from-list",' : ''} "sets": 3, "reps": "8-12", "restSeconds": 90}
         ]
       }
     ]
-  },
-  "mealPlan": {
-    "name": "plan name",
-    "dailyCalorieTarget": 2200,
-    "dailyProteinTarget": 130,
+  }${generateMeal ? ',' : ''}` : ''}
+  ${generateMeal ? `"mealPlan": {
+    "name": "plan name based on diet and goal",
+    "dailyCalorieTarget": 0,
+    "dailyProteinTarget": 0,
+    "macroSplit": {"proteinPct": 40, "carbsPct": 30, "fatPct": 30},
     "days": [
       {
         "dayNumber": 1,
@@ -107,29 +377,36 @@ Return ONLY valid JSON with this exact structure:
         ]
       }
     ]
-  }
+  }` : ''}
 }
 
 Rules:
-- Create exactly ${trainingDays} workout days + ${7 - trainingDays} rest days (mark rest days with empty exercises array)
-- Create 7 meal plan days
-- Diet type is ${dietType} — only include appropriate foods
-- If diet is vegetarian/vegan, no meat at all
-- Keep it practical and achievable for ${activityLevel} level
-- Protein target: ${goal === 'build_muscle' ? 'high (1g per lb bodyweight)' : goal === 'lose_fat' ? 'moderate-high (0.8g per lb)' : 'moderate (0.7g per lb)'}
+${generateWorkout ? `- Create EXACTLY ${trainingDays} training days + ${7 - trainingDays} rest days = 7 total days
+- Rest days have empty exercises array and dayName should include "Rest"
+- Training split must match ${trainingDays} training days (e.g., 3 days = Push/Pull/Legs, 4 days = Upper/Lower split, 5-6 days = PPL or body part split)
+- Volume and complexity must match ${experience_level || 'beginner'} level
+  - Beginner: 3-4 exercises per day, 3 sets each
+  - Intermediate: 4-5 exercises per day, 3-4 sets
+  - Advanced: 5-6 exercises per day, 4-5 sets` : ''}
+${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using the TDEE formula above — do NOT use placeholder values
+- Create 7 meal plan days with 4-5 meals each
+- Diet type is "${diet_type || 'omnivore'}" — only include appropriate foods
+- If vegetarian/vegan, absolutely no meat/fish
+- Each meal must have realistic calorie and macro values that sum to the daily targets` : ''}
 - Return ONLY the JSON, no explanation`
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 4000,
-      temperature: 0.3,
-      response_format: { type: 'json_object' },
-    })
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: prompt }],
+    max_tokens: 4000,
+    temperature: 0.3,
+    response_format: { type: 'json_object' },
+  })
 
-    const planData = JSON.parse(completion.choices[0].message.content)
+  const planData = JSON.parse(completion.choices[0].message.content)
 
-    // Save workout plan to Supabase
+  // Save workout plan
+  if (generateWorkout && planData.workoutPlan) {
     const { data: workoutPlan, error: wpError } = await supabase
       .from('workout_plans')
       .insert({
@@ -141,54 +418,79 @@ Rules:
       .select()
       .single()
 
-    if (!wpError && workoutPlan) {
-      for (const day of planData.workoutPlan.days) {
-        const { data: workoutDay } = await supabase
-          .from('workout_days')
-          .insert({
-            plan_id: workoutPlan.id,
-            day_number: day.dayNumber,
-            day_name: day.dayName,
-            muscle_groups: day.muscleGroups || [],
-          })
-          .select()
-          .single()
+    if (wpError) throw new Error(`Failed to save workout plan: ${wpError.message}`)
 
-        if (workoutDay && day.exercises?.length > 0) {
-          for (let i = 0; i < day.exercises.length; i++) {
-            const ex = day.exercises[i]
-            // Find or create exercise
-            let { data: exercise } = await supabase
+    for (const day of planData.workoutPlan.days) {
+      const { data: workoutDay, error: wdError } = await supabase
+        .from('workout_days')
+        .insert({
+          plan_id: workoutPlan.id,
+          day_number: day.dayNumber,
+          day_name: day.dayName,
+          muscle_groups: day.muscleGroups || [],
+        })
+        .select()
+        .single()
+
+      if (wdError) {
+        console.error(`Failed to save workout day ${day.dayNumber}:`, wdError.message)
+        continue
+      }
+
+      if (workoutDay && day.exercises?.length > 0) {
+        for (let i = 0; i < day.exercises.length; i++) {
+          const ex = day.exercises[i]
+          let exerciseId = null
+
+          // Use the exerciseId from GPT if it references a real exercise
+          if (ex.exerciseId) {
+            const { data: existing } = await supabase
               .from('exercises')
               .select('id')
-              .eq('name', ex.name)
+              .eq('id', ex.exerciseId)
               .single()
+            if (existing) exerciseId = existing.id
+          }
 
-            if (!exercise) {
-              const { data: newEx } = await supabase
-                .from('exercises')
-                .insert({ name: ex.name, is_custom: false })
-                .select()
-                .single()
-              exercise = newEx
-            }
+          // Fallback: find by name
+          if (!exerciseId) {
+            const { data: byName } = await supabase
+              .from('exercises')
+              .select('id')
+              .ilike('name', ex.name)
+              .limit(1)
+              .single()
+            if (byName) exerciseId = byName.id
+          }
 
-            if (exercise) {
-              await supabase.from('workout_day_exercises').insert({
-                workout_day_id: workoutDay.id,
-                exercise_id: exercise.id,
-                order_index: i,
-                sets: ex.sets || 3,
-                reps: String(ex.reps || '8-12'),
-                rest_seconds: ex.restSeconds || 90,
-              })
-            }
+          // Last resort: create the exercise
+          if (!exerciseId) {
+            const { data: newEx } = await supabase
+              .from('exercises')
+              .insert({ name: ex.name, is_custom: false })
+              .select()
+              .single()
+            if (newEx) exerciseId = newEx.id
+          }
+
+          if (exerciseId) {
+            const { error: wdeError } = await supabase.from('workout_day_exercises').insert({
+              workout_day_id: workoutDay.id,
+              exercise_id: exerciseId,
+              order_index: i,
+              sets: ex.sets || 3,
+              reps: String(ex.reps || '8-12'),
+              rest_seconds: ex.restSeconds || 90,
+            })
+            if (wdeError) console.error(`Failed to save exercise ${ex.name}:`, wdeError.message)
           }
         }
       }
     }
+  }
 
-    // Save meal plan to Supabase
+  // Save meal plan
+  if (generateMeal && planData.mealPlan) {
     const { data: mealPlan, error: mpError } = await supabase
       .from('meal_plans')
       .insert({
@@ -201,42 +503,42 @@ Rules:
       .select()
       .single()
 
-    if (!mpError && mealPlan) {
-      for (const day of planData.mealPlan.days) {
-        const { data: planDay } = await supabase
-          .from('meal_plan_days')
-          .insert({
-            plan_id: mealPlan.id,
-            day_number: day.dayNumber,
-            day_label: day.dayLabel,
-          })
-          .select()
-          .single()
+    if (mpError) throw new Error(`Failed to save meal plan: ${mpError.message}`)
 
-        if (planDay && day.meals?.length > 0) {
-          for (const meal of day.meals) {
-            await supabase.from('meals').insert({
-              plan_day_id: planDay.id,
-              meal_type: meal.mealType,
-              name: meal.name,
-              calories: meal.calories,
-              protein_g: meal.proteinG,
-              carbs_g: meal.carbsG,
-              fat_g: meal.fatG,
-              instructions: meal.instructions || '',
-            })
-          }
+    for (const day of planData.mealPlan.days) {
+      const { data: planDay, error: pdError } = await supabase
+        .from('meal_plan_days')
+        .insert({
+          plan_id: mealPlan.id,
+          day_number: day.dayNumber,
+          day_label: day.dayLabel,
+        })
+        .select()
+        .single()
+
+      if (pdError) {
+        console.error(`Failed to save meal plan day ${day.dayNumber}:`, pdError.message)
+        continue
+      }
+
+      if (planDay && day.meals?.length > 0) {
+        for (const meal of day.meals) {
+          const { error: mealError } = await supabase.from('meals').insert({
+            plan_day_id: planDay.id,
+            meal_type: meal.mealType,
+            name: meal.name,
+            calories: meal.calories,
+            protein_g: meal.proteinG,
+            carbs_g: meal.carbsG,
+            fat_g: meal.fatG,
+            instructions: meal.instructions || '',
+          })
+          if (mealError) console.error(`Failed to save meal ${meal.name}:`, mealError.message)
         }
       }
     }
-
-    res.json({ success: true, message: 'Plan generated and saved' })
-  } catch (error) {
-    console.error('Generate plan error:', error)
-    // Don't fail the onboarding even if plan generation fails
-    res.status(200).json({ success: true, message: 'Profile saved, plan generation pending' })
   }
-})
+}
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`FitTrack API v2 running on port ${PORT}`))
