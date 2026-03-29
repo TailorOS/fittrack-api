@@ -48,7 +48,19 @@ function coerceValue(field, value) {
 
   if (floatFields.includes(field)) return parseFloat(value)
   if (intFields.includes(field)) return parseInt(value, 10)
-  return value // string fields: goal, diet_type, experience_level, height, etc.
+
+  // Normalize goal values — GPT sometimes uses wrong format
+  if (field === 'goal') {
+    const v = String(value).toLowerCase().replace(/[^a-z_]/g, '')
+    if (v.includes('lose') || v.includes('fat') || v.includes('weight') || v.includes('cut')) return 'lose_fat'
+    if (v.includes('lean')) return 'lean_muscle'
+    if (v.includes('build') || v.includes('bulk') || v.includes('gain')) return 'build_muscle'
+    if (v.includes('maintain')) return 'maintain'
+    if (v.includes('perform') || v.includes('endur')) return 'performance'
+    return value // fallback to whatever was sent
+  }
+
+  return value
 }
 
 // =============================================
@@ -212,6 +224,14 @@ YOUR CAPABILITIES:
 When user mentions multiple stats at once (e.g. "I'm male, 24, 5'9, 135lbs"), call ALL relevant update_profile tools in PARALLEL in a single response. Use multiple tool_calls in one response — do NOT call them one at a time.
 
 When taking an action: state it briefly in ONE sentence (under 12 words). Do NOT ask for confirmation — the app handles that automatically. Example: "Updating your weight to 135 lbs."
+
+For goal updates, ALWAYS use these exact values for the 'value' field:
+- Lose fat / lose weight / cut = "lose_fat"
+- Build muscle / gain muscle = "build_muscle"
+- Lean muscle / lean bulk = "lean_muscle"
+- Maintain / maintenance = "maintain"
+- Performance / endurance = "performance"
+Never use values like "losing_weight", "gaining_muscle", "weight_loss" — only use the exact values above.
 
 For advice: be specific to THEIR stats. Reference their weight, goal, experience level. E.g. if they ask about protein, calculate based on their actual weight. If they ask about home workouts, give bodyweight routines. If they mention their mom cooks Indian food, suggest specific Indian dishes that fit their macros.
 
