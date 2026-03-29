@@ -192,7 +192,7 @@ You can take real actions:
 - Log body composition measurements
 - Generate a new workout or meal plan
 
-When they tell you their new weight, update it. When they ask for a new plan, generate it. When they log a measurement, save it.
+When you decide to take an action (update profile, log measurements, generate a plan), phrase your response as a clear recommendation asking the user to confirm. For example: "I can update your weight to 143 lbs — shall I go ahead?" or "I recommend generating a new meal plan based on your updated goals. Want me to do that?" The app will show a confirm button for the user.
 
 Always be conversational, motivating, and brief (2-4 sentences max unless they ask for detail). Use their name occasionally.`
 
@@ -218,65 +218,143 @@ Always be conversational, motivating, and brief (2-4 sentences max unless they a
     }, { timeout: 60000 })
 
     let assistantMessage = completion.choices[0].message
-    let action = null
 
-    // Handle tool calls (loop to support multiple sequential calls)
-    while (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
-      messages.push(assistantMessage)
+    // If GPT wants to call a tool, don't execute it — return as pendingAction for user confirmation
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      const toolCall = assistantMessage.tool_calls[0]
+      const toolName = toolCall.function.name
+      const toolArgs = JSON.parse(toolCall.function.arguments)
 
-      for (const toolCall of assistantMessage.tool_calls) {
-        const fnName = toolCall.function.name
-        const fnArgs = JSON.parse(toolCall.function.arguments)
-        let result
-
-        try {
-          switch (fnName) {
-            case 'update_profile':
-              result = await executeUpdateProfile(userId, fnArgs)
-              action = { type: 'profile_updated', field: fnArgs.field, value: fnArgs.value }
-              break
-            case 'log_body_composition':
-              result = await executeLogBodyComposition(userId, fnArgs)
-              action = { type: 'composition_logged' }
-              break
-            case 'regenerate_plan':
-              result = await executeRegeneratePlan(userId, fnArgs)
-              action = { type: 'plan_regenerated', plan_type: fnArgs.plan_type }
-              break
-            default:
-              result = { error: `Unknown function: ${fnName}` }
-          }
-        } catch (fnError) {
-          result = { error: fnError.message }
-        }
-
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result),
-        })
+      let pendingAction = null
+      if (toolName === 'update_profile') {
+        pendingAction = { type: 'profile_updated', field: toolArgs.field, value: toolArgs.value }
+      } else if (toolName === 'log_body_composition') {
+        pendingAction = { type: 'composition_logged', ...toolArgs }
+      } else if (toolName === 'regenerate_plan') {
+        pendingAction = { type: 'plan_regenerated', planType: toolArgs.plan_type }
       }
 
-      // Get follow-up response from GPT-4o with tool results
-      completion = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages,
-        tools: chatTools,
-        tool_choice: 'auto',
-        max_tokens: 500,
-        temperature: 0.7,
-      }, { timeout: 60000 })
-
-      assistantMessage = completion.choices[0].message
+      // Use GPT's content if it provided one, otherwise generate a fallback confirmation message
+      const message = assistantMessage.content || generateConfirmationText(pendingAction)
+      return res.json({ message, pendingAction })
     }
 
-    const response = { message: assistantMessage.content }
-    if (action) response.action = action
-
-    res.json(response)
+    res.json({ message: assistantMessage.content })
   } catch (error) {
     console.error('Chat error:', error)
     res.status(500).json({ error: 'Chat failed. Please try again.' })
+  }
+})
+
+// =============================================
+// CONFIRMATION TEXT — Fallback when GPT doesn't provide content alongside tool calls
+// =============================================
+function generateConfirmationText(action) {
+  if (!action) return "I'd like to make a change — shall I go ahead?"
+  switch (action.type) {
+    case 'profile_updated':
+      return `I can update your ${action.field} to ${action.value} — want me to go ahead?`
+    case 'composition_logged':
+      const parts = []
+      if (action.weight) parts.push(`weight: ${action.weight} lbs`)
+      if (action.body_fat_percentage) parts.push(`body fat: ${action.body_fat_percentage}%`)
+      if (action.muscle_mass) parts.push(`muscle mass: ${action.muscle_mass} lbs`)
+      return `I can log your measurements (${parts.join(', ')}) — shall I save that?`
+    case 'plan_regenerated':
+      return `I can generate a new ${action.planType || 'workout and meal'} plan for you — want me to do that?`
+    default:
+      return "I'd like to make a change — shall I go ahead?"
+  }
+}
+
+function getUpdateConfirmation(field, value) {
+  const messages = {
+    weight: `Done! I've updated your weight to ${value} lbs. Keep tracking your progress!`,
+    goal: `Updated! Your goal is now set to "${value}". I'll adjust my recommendations accordingly.`,
+    training_days_per_week: `Got it! Training days updated to ${value} per week.`,
+    diet_type: `Updated your diet preference to ${value}.`,
+    experience_level: `Experience level updated to ${value}.`,
+    activity_level: `Activity level updated to ${value}.`,
+    age: `Updated your age to ${value}.`,
+    height: `Updated your height to ${value}.`,
+  }
+  return messages[field] || `Updated your ${field} to ${value}.`
+}
+
+// =============================================
+// EXECUTE ACTION — Runs a confirmed pending action against the DB
+// =============================================
+app.post('/api/execute-action', async (req, res) => {
+  const { userId, action } = req.body
+
+  if (!userId || !action) {
+    return res.status(400).json({ error: 'userId and action required' })
+  }
+
+  try {
+    let confirmationMessage
+
+    switch (action.type) {
+      case 'profile_updated':
+        await executeUpdateProfile(userId, { field: action.field, value: action.value })
+        confirmationMessage = getUpdateConfirmation(action.field, action.value)
+        break
+
+      case 'composition_logged': {
+        const logArgs = {}
+        if (action.weight) logArgs.weight = action.weight
+        if (action.body_fat_percentage) logArgs.body_fat_percentage = action.body_fat_percentage
+        if (action.muscle_mass) logArgs.muscle_mass = action.muscle_mass
+        await executeLogBodyComposition(userId, logArgs)
+        confirmationMessage = "Logged! Your progress has been recorded."
+        break
+      }
+
+      case 'plan_regenerated': {
+        const planType = action.planType || 'both'
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .single()
+
+        if (profileError || !profile) {
+          return res.status(404).json({ error: 'Profile not found' })
+        }
+
+        // Apply fallbacks
+        profile.age = profile.age || 25
+        profile.gender = profile.gender || 'male'
+        profile.weight = profile.weight || 150
+        profile.height = profile.height || '5\'10"'
+        profile.activity_level = profile.activity_level || 'moderately_active'
+        profile.diet_type = profile.diet_type || 'balanced'
+        profile.experience_level = profile.experience_level || 'intermediate'
+        profile.training_days_per_week = profile.training_days_per_week || 4
+        profile.goal = profile.goal || 'lean muscle'
+        profile.full_name = profile.full_name || 'there'
+
+        // Deactivate existing plans
+        if (planType === 'workout' || planType === 'both') {
+          await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+        }
+        if (planType === 'meal' || planType === 'both') {
+          await supabase.from('meal_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+        }
+
+        await generateAndSavePlan(userId, profile, planType)
+        confirmationMessage = `Done! Your new ${planType === 'both' ? 'workout and meal plan has' : planType + ' plan has'} been generated. Check the ${planType === 'meal' ? 'Nutrition' : 'Workout'} tab.`
+        break
+      }
+
+      default:
+        return res.status(400).json({ error: 'Unknown action type' })
+    }
+
+    res.json({ message: confirmationMessage, success: true })
+  } catch (error) {
+    console.error('[execute-action] Error:', error.message)
+    res.status(500).json({ error: error.message })
   }
 })
 
