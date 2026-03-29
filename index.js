@@ -192,7 +192,7 @@ You can take real actions:
 - Log body composition measurements
 - Generate a new workout or meal plan
 
-When you decide to take an action (update profile, log measurements, generate a plan), phrase your response as a clear recommendation asking the user to confirm. For example: "I can update your weight to 143 lbs — shall I go ahead?" or "I recommend generating a new meal plan based on your updated goals. Want me to do that?" The app will show a confirm button for the user.
+When you decide to take an action (update profile, log measurements, generate a plan), make a brief statement about what you're going to do. Do NOT ask 'shall I go ahead?' or 'want me to do that?' — the app will show a confirm button automatically. Just say what you're doing in one sentence. Example: 'Updating your weight to 143 lbs.' or 'I'll generate a new meal plan based on your current goals.' Keep it under 15 words.
 
 Always be conversational, motivating, and brief (2-4 sentences max unless they ask for detail). Use their name occasionally.`
 
@@ -234,9 +234,9 @@ Always be conversational, motivating, and brief (2-4 sentences max unless they a
         pendingAction = { type: 'plan_regenerated', planType: toolArgs.plan_type }
       }
 
-      // Use GPT's content if it provided one, otherwise generate a fallback confirmation message
-      const message = assistantMessage.content || generateConfirmationText(pendingAction)
-      return res.json({ message, pendingAction })
+      // Always use a clean action statement — never GPT's content which may contain a question
+      const actionMessage = generateActionStatement(toolName, toolArgs)
+      return res.json({ message: actionMessage, pendingAction })
     }
 
     res.json({ message: assistantMessage.content })
@@ -247,24 +247,34 @@ Always be conversational, motivating, and brief (2-4 sentences max unless they a
 })
 
 // =============================================
-// CONFIRMATION TEXT — Fallback when GPT doesn't provide content alongside tool calls
+// ACTION STATEMENT — Clean statement for confirm card (no questions)
 // =============================================
-function generateConfirmationText(action) {
-  if (!action) return "I'd like to make a change — shall I go ahead?"
-  switch (action.type) {
-    case 'profile_updated':
-      return `I can update your ${action.field} to ${action.value} — want me to go ahead?`
-    case 'composition_logged':
-      const parts = []
-      if (action.weight) parts.push(`weight: ${action.weight} lbs`)
-      if (action.body_fat_percentage) parts.push(`body fat: ${action.body_fat_percentage}%`)
-      if (action.muscle_mass) parts.push(`muscle mass: ${action.muscle_mass} lbs`)
-      return `I can log your measurements (${parts.join(', ')}) — shall I save that?`
-    case 'plan_regenerated':
-      return `I can generate a new ${action.planType || 'workout and meal'} plan for you — want me to do that?`
-    default:
-      return "I'd like to make a change — shall I go ahead?"
+function generateActionStatement(toolName, toolArgs) {
+  if (toolName === 'update_profile') {
+    const fieldLabels = {
+      weight: `weight to ${toolArgs.value} lbs`,
+      goal: `goal to "${toolArgs.value}"`,
+      training_days_per_week: `training days to ${toolArgs.value} per week`,
+      diet_type: `diet preference to ${toolArgs.value}`,
+      experience_level: `experience level to ${toolArgs.value}`,
+      activity_level: `activity level to ${toolArgs.value}`,
+      age: `age to ${toolArgs.value}`,
+      height: `height to ${toolArgs.value}`,
+    }
+    return `Updating your ${fieldLabels[toolArgs.field] || toolArgs.field}.`
   }
+  if (toolName === 'log_body_composition') {
+    const parts = []
+    if (toolArgs.weight) parts.push(`weight: ${toolArgs.weight} lbs`)
+    if (toolArgs.body_fat_percentage) parts.push(`body fat: ${toolArgs.body_fat_percentage}%`)
+    if (toolArgs.muscle_mass) parts.push(`muscle mass: ${toolArgs.muscle_mass} lbs`)
+    return `Logging your measurements — ${parts.join(', ')}.`
+  }
+  if (toolName === 'regenerate_plan') {
+    const planLabels = { workout: 'workout plan', meal: 'meal plan', both: 'workout and meal plan' }
+    return `Generating a new ${planLabels[toolArgs.plan_type] || 'plan'} based on your profile.`
+  }
+  return 'Ready to update your profile.'
 }
 
 function getUpdateConfirmation(field, value) {
