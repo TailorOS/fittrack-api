@@ -240,29 +240,39 @@ Tone: Encouraging, direct, like a knowledgeable friend. 2-3 sentences max unless
 
     let assistantMessage = completion.choices[0].message
 
-    // If GPT wants to call a tool, return as pendingAction for user confirmation
-    // Only process ONE tool call at a time — user confirms each one sequentially
+    // If GPT wants to call tools, batch ALL updates into one pendingAction
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
-      const toolCall = assistantMessage.tool_calls[0] // always take first only
-      const toolName = toolCall.function.name
-      const toolArgs = JSON.parse(toolCall.function.arguments)
+      const allCalls = assistantMessage.tool_calls.map(tc => ({
+        name: tc.function.name,
+        args: JSON.parse(tc.function.arguments)
+      }))
 
-      let pendingAction = null
-      if (toolName === 'update_profile') {
-        pendingAction = { type: 'profile_updated', field: toolArgs.field, value: toolArgs.value }
-      } else if (toolName === 'log_body_composition') {
-        pendingAction = { type: 'composition_logged', ...toolArgs }
-      } else if (toolName === 'regenerate_plan') {
-        pendingAction = { type: 'plan_regenerated', planType: toolArgs.plan_type }
+      // Build a single batched pendingAction with all updates
+      const updates = []
+      const pendingAction = { type: 'batch_update', updates: [] }
+
+      for (const { name, args } of allCalls) {
+        if (name === 'update_profile') {
+          pendingAction.updates.push({ type: 'profile_updated', field: args.field, value: args.value })
+          const fieldLabels = { weight: 'Weight', goal: 'Goal', age: 'Age', height: 'Height', gender: 'Gender', training_days_per_week: 'Training days', diet_type: 'Diet', experience_level: 'Experience', activity_level: 'Activity level' }
+          updates.push(`${fieldLabels[args.field] || args.field}: ${args.value}`)
+        } else if (name === 'log_body_composition') {
+          pendingAction.updates.push({ type: 'composition_logged', ...args })
+          if (args.weight) updates.push(`Weight: ${args.weight} lbs`)
+          if (args.body_fat_percentage) updates.push(`Body fat: ${args.body_fat_percentage}%`)
+          if (args.muscle_mass) updates.push(`Muscle mass: ${args.muscle_mass} lbs`)
+        } else if (name === 'regenerate_plan') {
+          pendingAction.updates.push({ type: 'plan_regenerated', planType: args.plan_type })
+          updates.push(`Generate new ${args.plan_type} plan`)
+        }
       }
 
-      const actionMessage = generateActionStatement(toolName, toolArgs)
-      
-      // If there are MORE tool calls after this one, tell user there are more updates coming
-      const remainingCount = assistantMessage.tool_calls.length - 1
-      const suffix = remainingCount > 0 ? ` (${remainingCount} more update${remainingCount > 1 ? 's' : ''} after this)` : ''
-      
-      return res.json({ message: actionMessage + suffix, pendingAction })
+      // Single action message summarizing everything
+      const actionMessage = updates.length === 1
+        ? `Updating your ${updates[0].toLowerCase()}.`
+        : `Updating ${updates.length} things: ${updates.join(', ')}.`
+
+      return res.json({ message: actionMessage, pendingAction })
     }
 
     res.json({ message: assistantMessage.content })
@@ -330,6 +340,53 @@ app.post('/api/execute-action', async (req, res) => {
   }
 
   try {
+    // Handle batch updates (multiple fields at once)
+    if (action.type === 'batch_update' && Array.isArray(action.updates)) {
+      console.log(`[execute-action] Batch update: ${action.updates.length} items`)
+      const results = []
+      
+      // Collect all profile field updates into one Supabase call
+      const profileUpdates = {}
+      const otherUpdates = []
+      
+      for (const update of action.updates) {
+        if (update.type === 'profile_updated') {
+          profileUpdates[update.field] = coerceValue(update.field, update.value)
+        } else {
+          otherUpdates.push(update)
+        }
+      }
+      
+      // Single profile update call for all field changes
+      if (Object.keys(profileUpdates).length > 0) {
+        console.log('[execute-action] Batch profile update:', JSON.stringify(profileUpdates))
+        const { error } = await supabase.from('profiles').update(profileUpdates).eq('id', userId)
+        if (error) throw new Error(error.message)
+        results.push(`Updated: ${Object.keys(profileUpdates).join(', ')}`)
+      }
+      
+      // Handle other update types
+      for (const update of otherUpdates) {
+        if (update.type === 'composition_logged') {
+          const logData = { user_id: userId, logged_at: new Date().toISOString() }
+          if (update.weight != null) logData.weight = parseFloat(update.weight)
+          if (update.body_fat_percentage != null) logData.body_fat_percentage = parseFloat(update.body_fat_percentage)
+          if (update.muscle_mass != null) logData.muscle_mass = parseFloat(update.muscle_mass)
+          const { error } = await supabase.from('body_composition_logs').insert(logData)
+          if (error) throw new Error(error.message)
+          results.push('Body composition logged')
+        }
+      }
+      
+      const fieldLabels = { weight: 'weight', goal: 'goal', age: 'age', height: 'height', gender: 'gender', training_days_per_week: 'training days', diet_type: 'diet', experience_level: 'experience', activity_level: 'activity level' }
+      const updatedFields = Object.keys(profileUpdates).map(f => fieldLabels[f] || f)
+      const message = updatedFields.length === 1
+        ? `Done! Updated your ${updatedFields[0]}.`
+        : `Done! Updated your ${updatedFields.slice(0, -1).join(', ')} and ${updatedFields[updatedFields.length - 1]}.`
+      
+      return res.json({ success: true, message })
+    }
+
     switch (action.type) {
       case 'profile_updated': {
         const coercedValue = coerceValue(action.field, action.value)
