@@ -514,7 +514,7 @@ CALORIE CALCULATION (MUST follow these steps):
 1. Calculate BMR using Mifflin-St Jeor:
    - Male: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) + 5
    - Female: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) − 161
-   - User weight: ${weight}lbs (=${Math.round(weight * 0.453592)}kg), height: ${height}cm, age: ${age}, gender: ${gender || 'male'}
+   - User weight: ${weight}lbs (=${Math.round((weight||150) * 0.453592)}kg), height: ${parseFloat(height)||175}cm, age: ${age||25}, gender: ${gender || 'male'}
 2. Multiply BMR by activity factor:
    - Sedentary: ×1.2, Lightly active: ×1.375, Moderately active: ×1.55, Very active: ×1.725
    - User activity level: ${activity_level || 'moderately active'}
@@ -596,8 +596,14 @@ ${generateWorkout ? `- Create EXACTLY ${trainingDays} training days + ${7 - trai
   - Advanced: 5-6 exercises per day, 4-5 sets` : ''}
 ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using the TDEE formula above — do NOT use placeholder values
 - Create 7 meal plan days with 3 meals each (breakfast, lunch, dinner)
-- Diet type is "${diet_type || 'omnivore'}" — only include appropriate foods
-- If vegetarian/vegan, absolutely no meat/fish
+- CUISINE/DIET: "${diet_type || 'omnivore'}" — this is CRITICAL and MANDATORY:
+  * If "Indian": ALL meals must be traditional Indian food (dal, sabzi, roti, rice, paneer, chicken curry, biryani, idli, dosa, etc). NO Western food at all.
+  * If "Western": Use Western foods (chicken breast, salads, pasta, sandwiches, etc)
+  * If "Mediterranean": Use Mediterranean foods (hummus, falafel, fish, olive oil, etc)
+  * If "Asian": Use Asian foods (stir fry, noodles, rice bowls, sushi, etc)
+  * If vegetarian/vegan: absolutely no meat or fish
+  * Every single meal must match the cuisine preference above — do not mix cuisines
+- Meal names must clearly reflect the cuisine (e.g. "Dal Tadka with Jeera Rice" not "Lentil Soup")
 - Each meal must have realistic calorie and macro values that sum to the daily targets
 - Keep meal instructions to one sentence` : ''}`
 
