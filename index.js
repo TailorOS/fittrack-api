@@ -44,7 +44,7 @@ const chatTools = [
     type: 'function',
     function: {
       name: 'update_profile',
-      description: "Update the user's profile data (weight, goal, training days, etc.)",
+      description: "Update the user's profile data when they mention new stats or want to change their goal/settings",
       parameters: {
         type: 'object',
         properties: {
@@ -52,7 +52,7 @@ const chatTools = [
             type: 'string',
             enum: ['weight', 'goal', 'experience_level', 'activity_level', 'training_days_per_week', 'diet_type', 'age', 'height'],
           },
-          value: { type: 'string' },
+          value: { type: 'string', description: 'The new value as a string' },
         },
         required: ['field', 'value'],
       },
@@ -62,7 +62,7 @@ const chatTools = [
     type: 'function',
     function: {
       name: 'log_body_composition',
-      description: "Log the user's current weight, body fat percentage, or muscle mass",
+      description: "Log body measurements when user mentions their current weight, body fat %, or muscle mass",
       parameters: {
         type: 'object',
         properties: {
@@ -77,7 +77,7 @@ const chatTools = [
     type: 'function',
     function: {
       name: 'regenerate_plan',
-      description: "Generate a new workout or meal plan for the user based on their current profile",
+      description: "Generate a new workout or meal plan when user asks for one",
       parameters: {
         type: 'object',
         properties: {
@@ -173,17 +173,28 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const p = profileSnapshot || {}
-    const systemPrompt = `You are ${p.name || 'the user'}'s personal AI fitness trainer. Here's everything you know about them:
-- Age: ${p.age || 'unknown'}, Gender: ${p.gender || 'unknown'}, Weight: ${p.weight || 'unknown'}lbs, Height: ${p.height || 'unknown'}
-- Goal: ${p.goal || 'unknown'}, Experience: ${p.experienceLevel || 'unknown'}, Activity: ${p.activityLevel || 'unknown'}
-- Diet: ${p.dietType || 'unknown'}, Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
+    const name = p.name || 'there'
+    const systemPrompt = `You are ${name}'s personal AI fitness trainer. You know everything about them:
 
-You can update their profile, log body measurements, and regenerate their plans. Always be encouraging, specific, and personalized. Never be generic.
+Profile:
+- Name: ${name}, Age: ${p.age || 'unknown'}, Gender: ${p.gender || 'unknown'}
+- Weight: ${p.weight || 'unknown'} lbs, Height: ${p.height || 'unknown'}
+- Goal: ${p.goal || 'unknown'}
+- Experience: ${p.experienceLevel || 'unknown'}
+- Activity level: ${p.activityLevel || 'unknown'}
+- Diet: ${p.dietType || 'unknown'}
+- Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
 
-When the user mentions a new weight, body fat, or muscle mass measurement, use log_body_composition to record it.
-When the user wants to change a profile field (weight, goal, training days, etc.), use update_profile.
-When the user asks for a new plan, use regenerate_plan.
-Keep responses to 2-4 sentences unless asked for detail. Be direct like a real coach.`
+You are their dedicated trainer — encouraging, knowledgeable, and specific to THEIR situation. Never give generic advice. Always reference their actual stats, goals, and plan.
+
+You can take real actions:
+- Update their profile (weight, goal, training days, etc.)
+- Log body composition measurements
+- Generate a new workout or meal plan
+
+When they tell you their new weight, update it. When they ask for a new plan, generate it. When they log a measurement, save it.
+
+Always be conversational, motivating, and brief (2-4 sentences max unless they ask for detail). Use their name occasionally.`
 
     const messages = [{ role: 'system', content: systemPrompt }]
 
@@ -204,7 +215,7 @@ Keep responses to 2-4 sentences unless asked for detail. Be direct like a real c
       tool_choice: 'auto',
       max_tokens: 500,
       temperature: 0.7,
-    })
+    }, { timeout: 60000 })
 
     let assistantMessage = completion.choices[0].message
     let action = null
@@ -254,7 +265,7 @@ Keep responses to 2-4 sentences unless asked for detail. Be direct like a real c
         tool_choice: 'auto',
         max_tokens: 500,
         temperature: 0.7,
-      })
+      }, { timeout: 60000 })
 
       assistantMessage = completion.choices[0].message
     }
