@@ -22,10 +22,13 @@ app.use((req, res, next) => {
 })
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
-)
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+if (!process.env.SUPABASE_SERVICE_KEY) {
+  console.warn('WARNING: SUPABASE_SERVICE_KEY not set, falling back to SUPABASE_ANON_KEY — RLS will block updates!')
+} else {
+  console.log('Supabase initialized with SERVICE_KEY (RLS bypassed)')
+}
+const supabase = createClient(process.env.SUPABASE_URL, supabaseKey)
 
 // Root health check
 app.get('/', (req, res) => {
@@ -35,6 +38,18 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'FitTrack API v2', timestamp: new Date().toISOString() })
 })
+
+// =============================================
+// VALUE COERCION — Ensure correct types for Supabase columns
+// =============================================
+function coerceValue(field, value) {
+  const floatFields = ['weight', 'body_fat_percentage', 'muscle_mass']
+  const intFields = ['age', 'training_days_per_week']
+
+  if (floatFields.includes(field)) return parseFloat(value)
+  if (intFields.includes(field)) return parseInt(value, 10)
+  return value // string fields: goal, diet_type, experience_level, height, etc.
+}
 
 // =============================================
 // CHAT TOOLS — OpenAI function calling definitions
@@ -94,18 +109,21 @@ const chatTools = [
 // =============================================
 async function executeUpdateProfile(userId, args) {
   const { field, value } = args
-  const numericFields = ['weight', 'age', 'training_days_per_week']
-  const updateValue = numericFields.includes(field) ? Number(value) : value
+  const updateValue = coerceValue(field, value)
+
+  console.log(`[executeUpdateProfile] Updating profiles.${field} = ${JSON.stringify(updateValue)} (type: ${typeof updateValue}) for id=${userId}`)
 
   const { data, error } = await supabase
     .from('profiles')
     .update({ [field]: updateValue })
     .eq('id', userId)
     .select()
-    .single()
+
+  console.log('[executeUpdateProfile] Result:', JSON.stringify({ data, error }))
 
   if (error) throw new Error(`Failed to update profile: ${error.message}`)
-  return { success: true, field, value: updateValue }
+  if (!data || data.length === 0) throw new Error(`No profile found for userId: ${userId}`)
+  return { success: true, field, value: updateValue, updated: data[0] }
 }
 
 async function executeLogBodyComposition(userId, args) {
@@ -297,31 +315,75 @@ function getUpdateConfirmation(field, value) {
 app.post('/api/execute-action', async (req, res) => {
   const { userId, action } = req.body
 
+  console.log('[execute-action] Received:', JSON.stringify({ userId, action }))
+
   if (!userId || !action) {
     return res.status(400).json({ error: 'userId and action required' })
   }
 
   try {
-    let confirmationMessage
-
     switch (action.type) {
-      case 'profile_updated':
-        await executeUpdateProfile(userId, { field: action.field, value: action.value })
-        confirmationMessage = getUpdateConfirmation(action.field, action.value)
-        break
+      case 'profile_updated': {
+        const coercedValue = coerceValue(action.field, action.value)
+        console.log(`[execute-action] Updating profiles.${action.field} = ${JSON.stringify(coercedValue)} for id=${userId}`)
+
+        const { data, error } = await supabase
+          .from('profiles')
+          .update({ [action.field]: coercedValue })
+          .eq('id', userId)
+          .select()
+
+        console.log('[execute-action] Update result - data:', JSON.stringify(data), 'error:', JSON.stringify(error))
+
+        if (error) {
+          console.error('[execute-action] Supabase error:', error.message)
+          return res.status(500).json({ error: error.message })
+        }
+        if (!data || data.length === 0) {
+          console.error('[execute-action] No rows updated - userId:', userId)
+          return res.status(404).json({ error: 'Profile not found for this user' })
+        }
+
+        return res.json({
+          success: true,
+          message: getUpdateConfirmation(action.field, action.value),
+          updated: data[0]
+        })
+      }
 
       case 'composition_logged': {
-        const logArgs = {}
-        if (action.weight) logArgs.weight = action.weight
-        if (action.body_fat_percentage) logArgs.body_fat_percentage = action.body_fat_percentage
-        if (action.muscle_mass) logArgs.muscle_mass = action.muscle_mass
-        await executeLogBodyComposition(userId, logArgs)
-        confirmationMessage = "Logged! Your progress has been recorded."
-        break
+        const logData = {
+          user_id: userId,
+          logged_at: new Date().toISOString()
+        }
+        if (action.weight != null) logData.weight = parseFloat(action.weight)
+        if (action.body_fat_percentage != null) logData.body_fat_percentage = parseFloat(action.body_fat_percentage)
+        if (action.muscle_mass != null) logData.muscle_mass = parseFloat(action.muscle_mass)
+
+        console.log('[execute-action] Logging body composition:', JSON.stringify(logData))
+
+        const { data, error } = await supabase
+          .from('body_composition_logs')
+          .insert(logData)
+          .select()
+
+        console.log('[execute-action] Insert result - data:', JSON.stringify(data), 'error:', JSON.stringify(error))
+
+        if (error) {
+          console.error('[execute-action] Supabase error:', error.message)
+          return res.status(500).json({ error: error.message })
+        }
+
+        return res.json({
+          success: true,
+          message: 'Logged! Your progress has been recorded.'
+        })
       }
 
       case 'plan_regenerated': {
         const planType = action.planType || 'both'
+        console.log(`[execute-action] Regenerating ${planType} plan for userId:`, userId)
+
         const { data: profile, error: profileError } = await supabase
           .from('profiles')
           .select('*')
@@ -329,6 +391,7 @@ app.post('/api/execute-action', async (req, res) => {
           .single()
 
         if (profileError || !profile) {
+          console.error('[execute-action] Profile fetch error:', profileError?.message)
           return res.status(404).json({ error: 'Profile not found' })
         }
 
@@ -353,17 +416,17 @@ app.post('/api/execute-action', async (req, res) => {
         }
 
         await generateAndSavePlan(userId, profile, planType)
-        confirmationMessage = `Done! Your new ${planType === 'both' ? 'workout and meal plan has' : planType + ' plan has'} been generated. Check the ${planType === 'meal' ? 'Nutrition' : 'Workout'} tab.`
-        break
+        return res.json({
+          success: true,
+          message: `Done! Your new ${planType === 'both' ? 'workout and meal plans have' : planType + ' plan has'} been generated. Check the ${planType === 'meal' ? 'Nutrition' : 'Workout'} tab.`
+        })
       }
 
       default:
-        return res.status(400).json({ error: 'Unknown action type' })
+        return res.status(400).json({ error: `Unknown action type: ${action.type}` })
     }
-
-    res.json({ message: confirmationMessage, success: true })
   } catch (error) {
-    console.error('[execute-action] Error:', error.message)
+    console.error('[execute-action] ERROR:', error.message)
     res.status(500).json({ error: error.message })
   }
 })
