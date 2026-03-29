@@ -184,10 +184,10 @@ async function executeRegeneratePlan(userId, args) {
 // =============================================
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, userId, profileSnapshot, conversationHistory } = req.body
+    const { message, userId, profileSnapshot, conversationHistory, imageBase64 } = req.body
 
-    if (!message || !userId) {
-      return res.status(400).json({ error: 'message and userId are required' })
+    if ((!message && !imageBase64) || !userId) {
+      return res.status(400).json({ error: 'message (or imageBase64) and userId are required' })
     }
 
     const p = profileSnapshot || {}
@@ -215,7 +215,23 @@ When taking an action: state it briefly in ONE sentence (under 12 words). Do NOT
 
 For advice: be specific to THEIR stats. Reference their weight, goal, experience level. E.g. if they ask about protein, calculate based on their actual weight. If they ask about home workouts, give bodyweight routines. If they mention their mom cooks Indian food, suggest specific Indian dishes that fit their macros.
 
-Tone: Encouraging, direct, like a knowledgeable friend. 2-3 sentences max unless they ask for detail.`
+Tone: Encouraging, direct, like a knowledgeable friend. 2-3 sentences max unless they ask for detail.
+
+If the user sends a meal photo:
+- Identify all food items visible
+- Estimate calories and macros (protein, carbs, fat) for each item
+- Give total calories and macros
+- Tell them if this fits their daily targets based on their profile
+- Suggest any adjustments or alternatives from their cuisine preference
+- Format response clearly: food items listed, then totals
+
+If the user sends gym equipment/home gym photo:
+- Identify all equipment visible
+- List what muscle groups can be trained
+- Offer to generate a workout plan using only that equipment
+- Be specific about what exercises are possible
+
+Always respond as their personal trainer, referencing their goals and profile.`
 
     const messages = [{ role: 'system', content: systemPrompt }]
 
@@ -226,7 +242,26 @@ Tone: Encouraging, direct, like a knowledgeable friend. 2-3 sentences max unless
       }
     }
 
-    messages.push({ role: 'user', content: message })
+    if (imageBase64) {
+      messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:image/jpeg;base64,${imageBase64}`,
+              detail: 'low'
+            }
+          },
+          {
+            type: 'text',
+            text: message || 'What is in this image? Analyze it as my fitness trainer.'
+          }
+        ]
+      })
+    } else {
+      messages.push({ role: 'user', content: message })
+    }
 
     // First call — may return tool calls
     let completion = await openai.chat.completions.create({
@@ -828,6 +863,78 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
     }
   }
 }
+
+// =============================================
+// ANALYZE IMAGE — Dedicated vision endpoint for meal/equipment analysis
+// =============================================
+app.post('/api/analyze-image', async (req, res) => {
+  const { userId, imageBase64, analysisType, profileSnapshot } = req.body
+
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' })
+
+  const p = profileSnapshot || {}
+
+  let prompt = ''
+  if (analysisType === 'meal') {
+    prompt = `You are a nutrition expert and personal trainer for ${p.name || 'this user'}.
+
+Their profile: Goal: ${p.goal}, Weight: ${p.weight}lbs, Diet: ${p.dietType}, Daily calorie target: ~${p.dailyCalories || 'unknown'}
+
+Analyze this meal photo and provide:
+1. List of food items identified with estimated portion sizes
+2. Calories per item
+3. Total: Calories, Protein (g), Carbs (g), Fat (g)
+4. Whether this fits their goal (e.g. "Good protein source for muscle building" or "High in carbs, consider smaller portion")
+5. One specific tip based on their diet preference
+
+Format as JSON:
+{
+  "items": [{"name": "Dal", "portion": "1 cup", "calories": 180, "protein": 12, "carbs": 28, "fat": 4}],
+  "totals": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0},
+  "assessment": "brief assessment string",
+  "tip": "specific tip string"
+}`
+  } else if (analysisType === 'equipment') {
+    prompt = `Identify all gym/fitness equipment visible in this image. List each piece with:
+1. Equipment name
+2. What muscle groups it trains
+3. 3 key exercises possible with it
+
+Return as JSON:
+{
+  "equipment": [{"name": "Dumbbells", "muscleGroups": ["biceps", "triceps", "shoulders"], "exercises": ["Bicep curl", "Overhead press", "Lateral raise"]}],
+  "summary": "Brief summary of what full workout is possible with this setup"
+}`
+  } else {
+    prompt = `Analyze this fitness-related image. Describe what you see and provide relevant fitness advice. Return as JSON:
+{
+  "description": "what is in the image",
+  "advice": "relevant fitness advice"
+}`
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}`, detail: 'low' } },
+          { type: 'text', text: prompt }
+        ]
+      }],
+      max_tokens: 800,
+      temperature: 0.3,
+      response_format: { type: 'json_object' }
+    })
+
+    const result = JSON.parse(completion.choices[0].message.content)
+    res.json({ success: true, analysisType, result })
+  } catch (error) {
+    console.error('[analyze-image] Error:', error.message)
+    res.status(500).json({ error: 'Image analysis failed' })
+  }
+})
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log(`FitTrack API v2 running on port ${PORT}`))
