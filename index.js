@@ -608,27 +608,62 @@ async function generateAndSavePlan(userId, profile, planType) {
     .map(e => `- ID:${e.id} "${e.name}" (${e.muscle_group || 'general'}${e.equipment ? ', ' + e.equipment : ''})`)
     .join('\n')
 
-  // TDEE and macro calculation instructions
-  const tdeeInstructions = `
-CALORIE CALCULATION (MUST follow these steps):
-1. Calculate BMR using Mifflin-St Jeor:
-   - Male: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) + 5
-   - Female: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) − 161
-   - User weight: ${weight}lbs (=${Math.round((weight||150) * 0.453592)}kg), height: ${(() => { if (!height) return 175; const m = String(height).match(/(\d+)'(\d+)/); if (m) return Math.round((parseInt(m[1])*12 + parseInt(m[2]))*2.54); return parseFloat(height)||175; })()}cm, age: ${age||25}, gender: ${gender || 'male'}
-2. Multiply BMR by activity factor:
-   - Sedentary: ×1.2, Lightly active: ×1.375, Moderately active: ×1.55, Very active: ×1.725
-   - User activity level: ${activity_level || 'moderately active'}
-3. Adjust for goal:
-   - ${goal === 'build_muscle' || goal === 'lean_muscle' ? 'Muscle building: add +300 calories (lean surplus)' : ''}
-   - ${goal === 'lose_fat' || goal === 'weight_loss' ? 'Fat loss: subtract -500 calories (moderate deficit)' : ''}
-   - ${goal !== 'build_muscle' && goal !== 'lean_muscle' && goal !== 'lose_fat' && goal !== 'weight_loss' ? 'Maintenance: use TDEE as-is' : ''}
+  // Pre-calculate accurate macros server-side so GPT just uses the numbers
+  const weightKg = Math.round((weight || 150) * 0.453592)
+  const heightCmNum = (() => {
+    if (!height) return 175
+    const m = String(height).match(/(\d+)'(\d+)/)
+    if (m) return Math.round((parseInt(m[1]) * 12 + parseInt(m[2])) * 2.54)
+    return parseFloat(height) || 175
+  })()
+  const ageNum = age || 25
+  const genderStr = (gender || 'male').toLowerCase()
 
-MACRO SPLIT (MUST match goal):
-${goal === 'build_muscle' || goal === 'lean_muscle'
-    ? '- Protein: 40% of calories, Carbs: 30%, Fat: 30%'
-    : goal === 'lose_fat' || goal === 'weight_loss'
-      ? '- Protein: 40% of calories, Carbs: 35%, Fat: 25%'
-      : '- Protein: 30% of calories, Carbs: 40%, Fat: 30%'}
+  // BMR — Mifflin-St Jeor
+  const bmr = genderStr === 'female'
+    ? (10 * weightKg) + (6.25 * heightCmNum) - (5 * ageNum) - 161
+    : (10 * weightKg) + (6.25 * heightCmNum) - (5 * ageNum) + 5
+
+  // Activity multiplier
+  const activityMap = {
+    sedentary: 1.2, lightly_active: 1.375, light: 1.375,
+    moderately_active: 1.55, moderate: 1.55, active: 1.55,
+    very_active: 1.725, athlete: 1.9, extremely_active: 1.9
+  }
+  const activityKey = (activity_level || 'moderately_active').toLowerCase().replace(/ /g, '_')
+  const actMultiplier = activityMap[activityKey] || 1.55
+  const tdee = Math.round(bmr * actMultiplier)
+
+  // Goal adjustment
+  let targetCalories = tdee
+  if (goal === 'build_muscle' || goal === 'lean_muscle') targetCalories = tdee + 250
+  else if (goal === 'lose_fat' || goal === 'weight_loss') targetCalories = tdee - 400
+  // Never go below 1500
+  targetCalories = Math.max(targetCalories, 1500)
+
+  // Protein: evidence-based — 0.8–1g per lb bodyweight (not % of calories)
+  const weightLbs = weight || 150
+  let proteinG = Math.round(weightLbs * 0.9) // 0.9g per lb — solid for most goals
+  if (goal === 'build_muscle' || goal === 'lean_muscle') proteinG = Math.round(weightLbs * 1.0)
+  else if (goal === 'lose_fat') proteinG = Math.round(weightLbs * 1.0) // higher protein preserves muscle on deficit
+
+  // Remaining calories split between carbs and fat
+  const proteinCals = proteinG * 4
+  const remainingCals = targetCalories - proteinCals
+  const fatG = Math.round((remainingCals * 0.30) / 9)  // 30% of remaining from fat
+  const carbsG = Math.round((remainingCals * 0.70) / 4) // 70% of remaining from carbs
+
+  const tdeeInstructions = `
+PRE-CALCULATED NUTRITION TARGETS (use these EXACT numbers — do not recalculate):
+- BMR: ${Math.round(bmr)} kcal
+- TDEE (maintenance): ${tdee} kcal  
+- Daily Calorie Target: ${targetCalories} kcal (adjusted for ${goal} goal)
+- Daily Protein Target: ${proteinG}g (based on ${weightLbs} lbs bodyweight at 0.9-1.0g/lb — realistic and evidence-based)
+- Daily Carbs Target: ${carbsG}g
+- Daily Fat Target: ${fatG}g
+
+These numbers are pre-calculated correctly. Use them directly for dailyCalorieTarget and dailyProteinTarget.
+Do NOT override or recalculate these values.
 `
 
   const generateWorkout = planType === 'workout' || planType === 'both'
@@ -711,7 +746,7 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 4000,
+    max_tokens: 6000,
     temperature: 0.3,
     response_format: { type: 'json_object' },
   })
