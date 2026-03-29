@@ -514,7 +514,7 @@ CALORIE CALCULATION (MUST follow these steps):
 1. Calculate BMR using Mifflin-St Jeor:
    - Male: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) + 5
    - Female: BMR = (10 × weight_kg) + (6.25 × height_cm) − (5 × age) − 161
-   - User weight: ${weight}lbs (=${Math.round((weight||150) * 0.453592)}kg), height: ${parseFloat(height)||175}cm, age: ${age||25}, gender: ${gender || 'male'}
+   - User weight: ${weight}lbs (=${Math.round((weight||150) * 0.453592)}kg), height: ${(() => { if (!height) return 175; const m = String(height).match(/(\d+)'(\d+)/); if (m) return Math.round((parseInt(m[1])*12 + parseInt(m[2]))*2.54); return parseFloat(height)||175; })()}cm, age: ${age||25}, gender: ${gender || 'male'}
 2. Multiply BMR by activity factor:
    - Sedentary: ×1.2, Lightly active: ×1.375, Moderately active: ×1.55, Very active: ×1.725
    - User activity level: ${activity_level || 'moderately active'}
