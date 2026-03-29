@@ -669,6 +669,14 @@ Do NOT override or recalculate these values.
   const generateWorkout = planType === 'workout' || planType === 'both'
   const generateMeal = planType === 'meal' || planType === 'both'
 
+  // Always split workout and meal into separate GPT calls when generating both
+  // This prevents JSON truncation (was the main cause of "invalid JSON" errors)
+  if (planType === 'both') {
+    await generateAndSavePlan(userId, profile, 'workout')
+    await generateAndSavePlan(userId, profile, 'meal')
+    return
+  }
+
   const prompt = `Create a personalized fitness plan for this person:
 Name: ${full_name || 'User'}
 Age: ${age}, Gender: ${gender || 'not specified'}
@@ -746,7 +754,7 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
   const completion = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 6000,
+    max_tokens: 8000, // 7-day workout + 7-day meal plan needs room — old 4000 was causing truncated JSON
     temperature: 0.3,
     response_format: { type: 'json_object' },
   })
