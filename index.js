@@ -192,27 +192,30 @@ app.post('/api/chat', async (req, res) => {
 
     const p = profileSnapshot || {}
     const name = p.name || 'there'
-    const systemPrompt = `You are ${name}'s personal AI fitness trainer. You know everything about them:
+    const systemPrompt = `You are ${name}'s personal AI fitness and nutrition coach. You have full knowledge of their stats and goals. Be specific, personal, and actionable — never generic.
 
-Profile:
-- Name: ${name}, Age: ${p.age || 'unknown'}, Gender: ${p.gender || 'unknown'}
-- Weight: ${p.weight || 'unknown'} lbs, Height: ${p.height || 'unknown'}
-- Goal: ${p.goal || 'unknown'}
-- Experience: ${p.experienceLevel || 'unknown'}
-- Activity level: ${p.activityLevel || 'unknown'}
-- Diet: ${p.dietType || 'unknown'}
-- Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
+CLIENT PROFILE:
+- Name: ${name} | Age: ${p.age || 'unknown'} | Gender: ${p.gender || 'unknown'}
+- Weight: ${p.weight ? p.weight + ' lbs' : 'unknown'} | Height: ${p.height || 'unknown'}
+- Goal: ${p.goal || 'unknown'} | Experience: ${p.experienceLevel || 'unknown'}
+- Activity: ${p.activityLevel || 'unknown'} | Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
+- Diet/Cuisine: ${p.dietType || 'unknown'}
 
-You are their dedicated trainer — encouraging, knowledgeable, and specific to THEIR situation. Never give generic advice. Always reference their actual stats, goals, and plan.
+YOUR CAPABILITIES:
+1. Give workout advice tailored to their experience, goal, and available equipment (home or gym)
+2. Give nutrition advice based on their diet type and cuisine preference (e.g. Indian home-cooked meals)
+3. Answer any fitness/health question using their specific stats
+4. Update their profile when they share new info
+5. Log body composition when they share measurements
+6. Generate new workout or meal plans on request
 
-You can take real actions:
-- Update their profile (weight, goal, training days, etc.)
-- Log body composition measurements
-- Generate a new workout or meal plan
+When user mentions multiple stats at once (e.g. "I'm male, 24, 5'9, 135lbs"), only call ONE tool at a time — pick the most important update first (weight, then age, then height, then gender). The app will show confirm buttons one at a time.
 
-When you decide to take an action (update profile, log measurements, generate a plan), make a brief statement about what you're going to do. Do NOT ask 'shall I go ahead?' or 'want me to do that?' — the app will show a confirm button automatically. Just say what you're doing in one sentence. Example: 'Updating your weight to 143 lbs.' or 'I'll generate a new meal plan based on your current goals.' Keep it under 15 words.
+When taking an action: state it briefly in ONE sentence (under 12 words). Do NOT ask for confirmation — the app handles that automatically. Example: "Updating your weight to 135 lbs."
 
-Always be conversational, motivating, and brief (2-4 sentences max unless they ask for detail). Use their name occasionally.`
+For advice: be specific to THEIR stats. Reference their weight, goal, experience level. E.g. if they ask about protein, calculate based on their actual weight. If they ask about home workouts, give bodyweight routines. If they mention their mom cooks Indian food, suggest specific Indian dishes that fit their macros.
+
+Tone: Encouraging, direct, like a knowledgeable friend. 2-3 sentences max unless they ask for detail.`
 
     const messages = [{ role: 'system', content: systemPrompt }]
 
@@ -237,9 +240,10 @@ Always be conversational, motivating, and brief (2-4 sentences max unless they a
 
     let assistantMessage = completion.choices[0].message
 
-    // If GPT wants to call a tool, don't execute it — return as pendingAction for user confirmation
+    // If GPT wants to call a tool, return as pendingAction for user confirmation
+    // Only process ONE tool call at a time — user confirms each one sequentially
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
-      const toolCall = assistantMessage.tool_calls[0]
+      const toolCall = assistantMessage.tool_calls[0] // always take first only
       const toolName = toolCall.function.name
       const toolArgs = JSON.parse(toolCall.function.arguments)
 
@@ -252,9 +256,13 @@ Always be conversational, motivating, and brief (2-4 sentences max unless they a
         pendingAction = { type: 'plan_regenerated', planType: toolArgs.plan_type }
       }
 
-      // Always use a clean action statement — never GPT's content which may contain a question
       const actionMessage = generateActionStatement(toolName, toolArgs)
-      return res.json({ message: actionMessage, pendingAction })
+      
+      // If there are MORE tool calls after this one, tell user there are more updates coming
+      const remainingCount = assistantMessage.tool_calls.length - 1
+      const suffix = remainingCount > 0 ? ` (${remainingCount} more update${remainingCount > 1 ? 's' : ''} after this)` : ''
+      
+      return res.json({ message: actionMessage + suffix, pendingAction })
     }
 
     res.json({ message: assistantMessage.content })
