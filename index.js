@@ -209,7 +209,7 @@ YOUR CAPABILITIES:
 5. Log body composition when they share measurements
 6. Generate new workout or meal plans on request
 
-When user mentions multiple stats at once (e.g. "I'm male, 24, 5'9, 135lbs"), only call ONE tool at a time — pick the most important update first (weight, then age, then height, then gender). The app will show confirm buttons one at a time.
+When user mentions multiple stats at once (e.g. "I'm male, 24, 5'9, 135lbs"), call ALL relevant update_profile tools in PARALLEL in a single response. Use multiple tool_calls in one response — do NOT call them one at a time.
 
 When taking an action: state it briefly in ONE sentence (under 12 words). Do NOT ask for confirmation — the app handles that automatically. Example: "Updating your weight to 135 lbs."
 
@@ -269,6 +269,7 @@ Always respond as their personal trainer, referencing their goals and profile.`
       messages,
       tools: chatTools,
       tool_choice: 'auto',
+      parallel_tool_calls: true, // allow multiple updates in one response
       max_tokens: 500,
       temperature: 0.7,
     }, { timeout: 60000 })
