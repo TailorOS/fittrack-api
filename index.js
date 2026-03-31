@@ -141,15 +141,12 @@ async function executeUpdateProfile(userId, args) {
 async function executeLogBodyComposition(userId, args) {
   const logEntry = { user_id: userId, logged_at: new Date().toISOString() }
   if (args.weight != null) {
-    logEntry.weight = args.weight
     logEntry.weight_lbs = args.weight
   }
   if (args.body_fat_percentage != null) {
-    logEntry.body_fat_percentage = args.body_fat_percentage
     logEntry.body_fat_pct = args.body_fat_percentage
   }
   if (args.muscle_mass != null) {
-    logEntry.muscle_mass = args.muscle_mass
     logEntry.muscle_mass_lbs = args.muscle_mass
   }
 
@@ -212,7 +209,19 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const p = profileSnapshot || {}
+    const ts = p.todayStats || {}
     const name = p.name || 'there'
+    
+    // Build today's summary string from live data
+    const todaySummary = ts.calTarget ? `
+TODAY'S LIVE DATA (real-time, use these exact numbers when asked):
+- Score: ${ts.score || 0}/100
+- Calories consumed: ${ts.calConsumed || 0} / ${ts.calTarget} kcal (${Math.round(((ts.calConsumed || 0) / (ts.calTarget || 1)) * 100)}% of target)
+- Protein consumed: ${ts.proteinConsumed || 0}g / ${ts.proteinTarget || 0}g (${ts.proteinConsumed >= ts.proteinTarget ? 'TARGET HIT ✓' : (ts.proteinTarget - ts.proteinConsumed) + 'g remaining'})
+- Workout: ${ts.workoutDone ? 'COMPLETED ✓' : 'Not done yet'}
+- Weight logged today: ${ts.bodyCompLogged ? 'YES ✓' : 'Not logged yet'}
+- Meals confirmed: ${ts.confirmedCount || 0} of ${ts.totalMeals || 0} plan meals` : ''
+    
     const systemPrompt = `You are ${name}'s personal AI fitness and nutrition coach. You have full knowledge of their stats and goals. Be specific, personal, and actionable — never generic.
 
 CLIENT PROFILE:
@@ -221,6 +230,9 @@ CLIENT PROFILE:
 - Goal: ${p.goal || 'unknown'} | Experience: ${p.experienceLevel || 'unknown'}
 - Activity: ${p.activityLevel || 'unknown'} | Training: ${p.trainingDaysPerWeek || 'unknown'} days/week
 - Diet/Cuisine: ${p.dietType || 'unknown'}
+- Protein target from plan: ${ts.proteinTarget ? ts.proteinTarget + 'g/day' : 'see profile weight × 1g/lb'}
+- Calorie target from plan: ${ts.calTarget ? ts.calTarget + ' kcal/day' : 'calculated from TDEE'}
+${todaySummary}
 
 YOUR CAPABILITIES:
 1. Give workout advice tailored to their experience, goal, and available equipment (home or gym)
@@ -435,15 +447,12 @@ app.post('/api/execute-action', async (req, res) => {
         if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
           if (update.weight != null) {
-            logData.weight = parseFloat(update.weight)
             logData.weight_lbs = parseFloat(update.weight)
           }
           if (update.body_fat_percentage != null) {
-            logData.body_fat_percentage = parseFloat(update.body_fat_percentage)
             logData.body_fat_pct = parseFloat(update.body_fat_percentage)
           }
           if (update.muscle_mass != null) {
-            logData.muscle_mass = parseFloat(update.muscle_mass)
             logData.muscle_mass_lbs = parseFloat(update.muscle_mass)
           }
           const { error } = await supabase.from('body_composition_logs').insert(logData)
@@ -496,15 +505,12 @@ app.post('/api/execute-action', async (req, res) => {
           logged_at: new Date().toISOString()
         }
         if (action.weight != null) {
-          logData.weight = parseFloat(action.weight)
           logData.weight_lbs = parseFloat(action.weight)
         }
         if (action.body_fat_percentage != null) {
-          logData.body_fat_percentage = parseFloat(action.body_fat_percentage)
           logData.body_fat_pct = parseFloat(action.body_fat_percentage)
         }
         if (action.muscle_mass != null) {
-          logData.muscle_mass = parseFloat(action.muscle_mass)
           logData.muscle_mass_lbs = parseFloat(action.muscle_mass)
         }
 
@@ -795,7 +801,8 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
   * If vegetarian/vegan: absolutely no meat or fish
   * Every single meal must match the cuisine preference above — do not mix cuisines
 - Meal names must clearly reflect the cuisine (e.g. "Dal Tadka with Jeera Rice" not "Lentil Soup")
-- Each meal must have realistic calorie and macro values that sum to the daily targets
+- CRITICAL: Each day's 3 meals MUST sum to EXACTLY the dailyProteinTarget (+/- 5g) and dailyCalorieTarget (+/- 50 kcal). Verify your math before responding. If meals add up to less, increase protein amounts.
+- High-protein meal sources to use: chicken/fish curry (25-35g protein per serving), dal makhani (18g/cup), paneer dishes (14g/100g), egg dishes (6g/egg), Greek yogurt (17g/cup)
 - Keep meal instructions to one sentence` : ''}`
 
   console.log(`[generate-plan] Sending prompt to GPT-4o (planType: ${planType})`)
