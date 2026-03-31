@@ -929,6 +929,82 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
 }
 
 // =============================================
+// SNAP MEAL — Quick food photo analysis with GPT-4o Vision
+// =============================================
+app.post('/api/snap-meal', async (req, res) => {
+  const { imageBase64, userId } = req.body
+
+  if (!imageBase64) {
+    return res.status(400).json({ error: 'imageBase64 required' })
+  }
+
+  console.log(`[snap-meal] Analyzing food image for userId: ${userId}`)
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:image/jpeg;base64,${imageBase64}`,
+              detail: 'low'
+            }
+          },
+          {
+            type: 'text',
+            text: `Analyze this food image. Be quick and realistic.
+
+Return ONLY this JSON (no markdown, no explanation):
+{
+  "name": "simple food name",
+  "calories": 400,
+  "protein": 25,
+  "confidence": "high"
+}
+
+Rules:
+- name: short and simple (e.g. "Dal with Rice" not "Traditional Indian Dal Makhani with Steamed Basmati Rice")
+- calories: realistic estimate for the portion shown
+- protein: realistic protein grams
+- confidence: "high" if food is clear, "low" if unsure
+- If you cannot identify food, return: {"error": "Could not identify food in this image"}`
+          }
+        ]
+      }],
+      max_tokens: 150,
+      temperature: 0.1,
+      response_format: { type: 'json_object' }
+    })
+
+    const raw = completion.choices[0].message.content
+    console.log(`[snap-meal] Response: ${raw}`)
+
+    const result = JSON.parse(raw)
+
+    if (result.error) {
+      return res.status(422).json({ error: result.error })
+    }
+
+    res.json({
+      success: true,
+      meal: {
+        name: result.name,
+        calories: Math.round(result.calories),
+        protein: Math.round(result.protein),
+        confidence: result.confidence || 'medium'
+      }
+    })
+
+  } catch (error) {
+    console.error('[snap-meal] Error:', error.message)
+    res.status(500).json({ error: 'Failed to analyze image. Please try again.' })
+  }
+})
+
+// =============================================
 // ANALYZE IMAGE — Dedicated vision endpoint for meal/equipment analysis
 // =============================================
 app.post('/api/analyze-image', async (req, res) => {
