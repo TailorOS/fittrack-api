@@ -140,9 +140,18 @@ async function executeUpdateProfile(userId, args) {
 
 async function executeLogBodyComposition(userId, args) {
   const logEntry = { user_id: userId, logged_at: new Date().toISOString() }
-  if (args.weight != null) logEntry.weight = args.weight
-  if (args.body_fat_percentage != null) logEntry.body_fat_percentage = args.body_fat_percentage
-  if (args.muscle_mass != null) logEntry.muscle_mass = args.muscle_mass
+  if (args.weight != null) {
+    logEntry.weight = args.weight
+    logEntry.weight_lbs = args.weight
+  }
+  if (args.body_fat_percentage != null) {
+    logEntry.body_fat_percentage = args.body_fat_percentage
+    logEntry.body_fat_pct = args.body_fat_percentage
+  }
+  if (args.muscle_mass != null) {
+    logEntry.muscle_mass = args.muscle_mass
+    logEntry.muscle_mass_lbs = args.muscle_mass
+  }
 
   const { data, error } = await supabase
     .from('body_composition_logs')
@@ -425,9 +434,18 @@ app.post('/api/execute-action', async (req, res) => {
       for (const update of otherUpdates) {
         if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
-          if (update.weight != null) logData.weight = parseFloat(update.weight)
-          if (update.body_fat_percentage != null) logData.body_fat_percentage = parseFloat(update.body_fat_percentage)
-          if (update.muscle_mass != null) logData.muscle_mass = parseFloat(update.muscle_mass)
+          if (update.weight != null) {
+            logData.weight = parseFloat(update.weight)
+            logData.weight_lbs = parseFloat(update.weight)
+          }
+          if (update.body_fat_percentage != null) {
+            logData.body_fat_percentage = parseFloat(update.body_fat_percentage)
+            logData.body_fat_pct = parseFloat(update.body_fat_percentage)
+          }
+          if (update.muscle_mass != null) {
+            logData.muscle_mass = parseFloat(update.muscle_mass)
+            logData.muscle_mass_lbs = parseFloat(update.muscle_mass)
+          }
           const { error } = await supabase.from('body_composition_logs').insert(logData)
           if (error) throw new Error(error.message)
           results.push('Body composition logged')
@@ -477,9 +495,18 @@ app.post('/api/execute-action', async (req, res) => {
           user_id: userId,
           logged_at: new Date().toISOString()
         }
-        if (action.weight != null) logData.weight = parseFloat(action.weight)
-        if (action.body_fat_percentage != null) logData.body_fat_percentage = parseFloat(action.body_fat_percentage)
-        if (action.muscle_mass != null) logData.muscle_mass = parseFloat(action.muscle_mass)
+        if (action.weight != null) {
+          logData.weight = parseFloat(action.weight)
+          logData.weight_lbs = parseFloat(action.weight)
+        }
+        if (action.body_fat_percentage != null) {
+          logData.body_fat_percentage = parseFloat(action.body_fat_percentage)
+          logData.body_fat_pct = parseFloat(action.body_fat_percentage)
+        }
+        if (action.muscle_mass != null) {
+          logData.muscle_mass = parseFloat(action.muscle_mass)
+          logData.muscle_mass_lbs = parseFloat(action.muscle_mass)
+        }
 
         console.log('[execute-action] Logging body composition:', JSON.stringify(logData))
 
