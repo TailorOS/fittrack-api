@@ -944,6 +944,22 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
       }
 
       if (planDay && day.meals?.length > 0) {
+        // Server-side protein enforcement: if day's meals don't sum to target, boost dinner
+        const dayProteinTotal = day.meals.reduce((sum, m) => sum + (m.proteinG || 0), 0)
+        const targetProtein = planData.mealPlan.dailyProteinTarget || proteinG
+        const proteinGap = targetProtein - dayProteinTotal
+        
+        if (proteinGap > 5) {
+          // Find dinner (or last meal) and boost its protein
+          const dinnerIdx = day.meals.findIndex(m => m.mealType === 'dinner')
+          const boostIdx = dinnerIdx >= 0 ? dinnerIdx : day.meals.length - 1
+          const boost = Math.round(proteinGap)
+          day.meals[boostIdx].proteinG = (day.meals[boostIdx].proteinG || 0) + boost
+          // Add equivalent calories (4 kcal/g protein)
+          day.meals[boostIdx].calories = (day.meals[boostIdx].calories || 0) + (boost * 4)
+          console.log(`[generate-plan] Day ${day.dayNumber}: protein gap ${proteinGap}g, boosted ${day.meals[boostIdx].name} dinner by +${boost}g protein`)
+        }
+
         for (const meal of day.meals) {
           const { error: mealError } = await supabase.from('meals').insert({
             plan_day_id: planDay.id,
