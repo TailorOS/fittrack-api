@@ -487,7 +487,16 @@ app.post('/api/execute-action', async (req, res) => {
       
       // Handle other update types
       for (const update of otherUpdates) {
-        if (update.type === 'composition_logged') {
+        if (update.type === 'food_logged') {
+          // Pass food data back to app — app saves to AsyncStorage
+          results.push(`food_logged:${JSON.stringify({
+            food_name: update.food_name,
+            calories: update.calories || 0,
+            protein_g: update.protein_g || 0,
+            carbs_g: update.carbs_g || 0,
+            fat_g: update.fat_g || 0,
+          })}`)
+        } else if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
           if (update.weight != null) {
             logData.weight_lbs = parseFloat(update.weight)
@@ -506,9 +515,21 @@ app.post('/api/execute-action', async (req, res) => {
       
       const fieldLabels = { weight: 'weight', goal: 'goal', age: 'age', height: 'height', gender: 'gender', training_days_per_week: 'training days', diet_type: 'diet', experience_level: 'experience', activity_level: 'activity level' }
       const updatedFields = Object.keys(profileUpdates).map(f => fieldLabels[f] || f)
-      const message = updatedFields.length === 1
-        ? `Done! Updated your ${updatedFields[0]}.`
-        : `Done! Updated your ${updatedFields.slice(0, -1).join(', ')} and ${updatedFields[updatedFields.length - 1]}.`
+      
+      // Build appropriate success message
+      const foodLogResults = results.filter(r => r.startsWith('food_logged:'))
+      let message
+      if (foodLogResults.length > 0 && updatedFields.length === 0) {
+        // Only food was logged
+        const foods = foodLogResults.map(r => { try { return JSON.parse(r.replace('food_logged:', '')).food_name } catch { return 'food' } })
+        message = `Logged ${foods.join(', ')} to your food diary! 🍽️`
+      } else if (updatedFields.length === 1) {
+        message = `Done! Updated your ${updatedFields[0]}.`
+      } else if (updatedFields.length > 1) {
+        message = `Done! Updated your ${updatedFields.slice(0, -1).join(', ')} and ${updatedFields[updatedFields.length - 1]}.`
+      } else {
+        message = 'Done! Changes saved.'
+      }
       
       // Extract any food_logged results to return to app
       const foodLogs = results.filter(r => r.startsWith('food_logged:')).map(r => {
