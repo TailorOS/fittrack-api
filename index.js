@@ -168,9 +168,11 @@ async function executeLogBodyComposition(userId, args) {
     logEntry.muscle_mass_lbs = args.muscle_mass
   }
 
+  const todayDateStr = logEntry.logged_at.split('T')[0]
+  logEntry.logged_at = todayDateStr  // Use date only for upsert conflict key
   const { data, error } = await supabase
     .from('body_composition_logs')
-    .insert(logEntry)
+    .upsert(logEntry, { onConflict: 'user_id,logged_at' })
     .select()
     .single()
 
@@ -507,7 +509,7 @@ app.post('/api/execute-action', async (req, res) => {
           if (update.muscle_mass != null) {
             logData.muscle_mass_lbs = parseFloat(update.muscle_mass)
           }
-          const { error } = await supabase.from('body_composition_logs').insert(logData)
+          const { error } = await supabase.from('body_composition_logs').upsert(logData, { onConflict: 'user_id,logged_at' })
           if (error) throw new Error(error.message)
           results.push('Body composition logged')
         }
@@ -580,38 +582,25 @@ app.post('/api/execute-action', async (req, res) => {
       }
 
       case 'composition_logged': {
-        const logData = {
-          user_id: userId,
-          logged_at: new Date().toISOString()
-        }
-        if (action.weight != null) {
-          logData.weight_lbs = parseFloat(action.weight)
-        }
-        if (action.body_fat_percentage != null) {
-          logData.body_fat_pct = parseFloat(action.body_fat_percentage)
-        }
-        if (action.muscle_mass != null) {
-          logData.muscle_mass_lbs = parseFloat(action.muscle_mass)
-        }
+        const todayStr = new Date().toISOString().split('T')[0]
+        const logData = { user_id: userId, logged_at: todayStr }
+        if (action.weight != null) logData.weight_lbs = parseFloat(action.weight)
+        if (action.body_fat_percentage != null) logData.body_fat_pct = parseFloat(action.body_fat_percentage)
+        if (action.muscle_mass != null) logData.muscle_mass_lbs = parseFloat(action.muscle_mass)
 
-        console.log('[execute-action] Logging body composition:', JSON.stringify(logData))
+        console.log('[execute-action] Upserting body composition:', JSON.stringify(logData))
 
         const { data, error } = await supabase
           .from('body_composition_logs')
-          .insert(logData)
+          .upsert(logData, { onConflict: 'user_id,logged_at' })
           .select()
-
-        console.log('[execute-action] Insert result - data:', JSON.stringify(data), 'error:', JSON.stringify(error))
 
         if (error) {
           console.error('[execute-action] Supabase error:', error.message)
           return res.status(500).json({ error: error.message })
         }
 
-        return res.json({
-          success: true,
-          message: 'Logged! Your progress has been recorded.'
-        })
+        return res.json({ success: true, message: 'Updated! Your body composition has been saved.' })
       }
 
       case 'plan_regenerated': {
@@ -883,7 +872,7 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
 - Meal names must clearly reflect the cuisine (e.g. "Dal Tadka with Jeera Rice" not "Lentil Soup")
 - CRITICAL: Each day's 3 meals MUST sum to EXACTLY the dailyProteinTarget (+/- 5g) and dailyCalorieTarget (+/- 50 kcal). Verify your math before responding. If meals add up to less, increase protein amounts.
 - High-protein meal sources to use: chicken/fish curry (25-35g protein per serving), dal makhani (18g/cup), paneer dishes (14g/100g), egg dishes (6g/egg), Greek yogurt (17g/cup)
-- Keep meal instructions to one sentence` : ''}`
+- Meal instructions must be ONE specific sentence with exact portions and key macros, e.g. '150g chicken breast + 1 cup basmati rice + 2 tbsp dal (~35g protein, 450 kcal)'` : ''}`
 
   console.log(`[generate-plan] Sending prompt to GPT-4o (planType: ${planType})`)
   const completion = await openai.chat.completions.create({
@@ -1006,6 +995,14 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
 
     if (mpError) throw new Error(`Failed to save meal plan: ${mpError.message}`)
     console.log(`[generate-plan] Saved meal plan: ${mealPlan.id}`)
+
+    // Clear today's confirmed meal IDs since they belonged to the old plan
+    const todayForClear = new Date().toISOString().split('T')[0]
+    await supabase
+      .from('daily_nutrition_logs')
+      .update({ confirmed_meal_ids: [], total_protein_g: 0, total_calories: 0 })
+      .eq('user_id', userId)
+      .eq('logged_date', todayForClear)
 
     for (const day of planData.mealPlan.days) {
       const { data: planDay, error: pdError } = await supabase
