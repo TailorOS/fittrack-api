@@ -441,6 +441,60 @@ function getUpdateConfirmation(field, value) {
 }
 
 // =============================================
+// RECALCULATE PLAN TARGETS — Updates calorie/protein targets when profile changes
+// Does NOT regenerate meals — just updates the daily_calorie_target and daily_protein_target
+// =============================================
+async function recalculatePlanTargets(userId, profile) {
+  const weight = profile.weight || 150
+  const age = profile.age || 25
+  const gender = (profile.gender || 'male').toLowerCase()
+  const goal = profile.goal || 'maintain'
+  const activityLevel = (profile.activity_level || 'moderately_active').toLowerCase().replace(/ /g, '_')
+
+  // Parse height
+  const heightStr = String(profile.height || "5'10"")
+  const m = heightStr.match(/(\d+)'(\d+)/)
+  const heightCm = m ? Math.round((parseInt(m[1]) * 12 + parseInt(m[2])) * 2.54) : 175
+  const weightKg = Math.round(weight * 0.453592)
+
+  // BMR — Mifflin-St Jeor
+  const bmr = gender === 'female'
+    ? (10 * weightKg) + (6.25 * heightCm) - (5 * age) - 161
+    : (10 * weightKg) + (6.25 * heightCm) - (5 * age) + 5
+
+  const activityMap = {
+    sedentary: 1.2, lightly_active: 1.375, light: 1.375,
+    moderately_active: 1.55, moderate: 1.55, active: 1.55,
+    very_active: 1.725, athlete: 1.9, extremely_active: 1.9
+  }
+  const tdee = Math.round(bmr * (activityMap[activityLevel] || 1.55))
+
+  let targetCalories = tdee
+  if (goal === 'build_muscle' || goal === 'lean_muscle') targetCalories = tdee + 250
+  else if (goal === 'lose_fat' || goal === 'weight_loss') targetCalories = tdee - 400
+  targetCalories = Math.max(targetCalories, 1500)
+
+  let proteinG = Math.round(weight * 0.9)
+  if (goal === 'build_muscle' || goal === 'lean_muscle') proteinG = Math.round(weight * 1.0)
+  else if (goal === 'lose_fat') proteinG = Math.round(weight * 1.0)
+
+  // Update active meal plan targets
+  const { error } = await supabase
+    .from('meal_plans')
+    .update({
+      daily_calorie_target: targetCalories,
+      daily_protein_target: proteinG,
+    })
+    .eq('user_id', userId)
+    .eq('is_active', true)
+
+  if (error) console.error('[recalculatePlanTargets] Error:', error.message)
+  else console.log(`[recalculatePlanTargets] Updated: ${targetCalories} kcal, ${proteinG}g protein for goal=${goal}`)
+
+  return { targetCalories, proteinG }
+}
+
+// =============================================
 // EXECUTE ACTION — Runs a confirmed pending action against the DB
 // =============================================
 app.post('/api/execute-action', async (req, res) => {
@@ -533,6 +587,16 @@ app.post('/api/execute-action', async (req, res) => {
         message = 'Done! Changes saved.'
       }
       
+      // If any plan-affecting fields were updated in batch, recalculate plan targets
+      const planFields = ['weight', 'goal', 'activity_level', 'training_days_per_week']
+      const changedPlanField = Object.keys(profileUpdates).some(f => planFields.includes(f))
+      if (changedPlanField) {
+        try {
+          const { data: freshProfile } = await supabase.from('profiles').select('*').eq('id', userId).single()
+          if (freshProfile) await recalculatePlanTargets(userId, freshProfile)
+        } catch (e) { console.log('[execute-action] Batch plan recalc failed:', e.message) }
+      }
+
       // Extract any food_logged results to return to app
       const foodLogs = results.filter(r => r.startsWith('food_logged:')).map(r => {
         try { return JSON.parse(r.replace('food_logged:', '')) } catch { return null }
@@ -574,10 +638,25 @@ app.post('/api/execute-action', async (req, res) => {
           console.log(`[execute-action] Also wrote weight_lbs=${action.value} to body_composition_logs`)
         }
 
+        // If goal, weight, or activity changed — recalculate and update meal plan targets
+        const planAffectingFields = ['weight', 'goal', 'activity_level', 'training_days_per_week']
+        if (planAffectingFields.includes(action.field)) {
+          try {
+            const { data: freshProfile } = await supabase.from('profiles').select('*').eq('id', userId).single()
+            if (freshProfile) {
+              await recalculatePlanTargets(userId, freshProfile)
+              console.log(`[execute-action] Recalculated plan targets after ${action.field} change`)
+            }
+          } catch (e) {
+            console.log('[execute-action] Plan target recalc failed (non-fatal):', e.message)
+          }
+        }
+
         return res.json({
           success: true,
           message: getUpdateConfirmation(action.field, action.value),
-          updated: data[0]
+          updated: data[0],
+          planRecalculated: planAffectingFields.includes(action.field)
         })
       }
 
