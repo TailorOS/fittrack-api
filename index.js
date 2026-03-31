@@ -452,7 +452,7 @@ async function recalculatePlanTargets(userId, profile) {
   const activityLevel = (profile.activity_level || 'moderately_active').toLowerCase().replace(/ /g, '_')
 
   // Parse height
-  const heightStr = String(profile.height || "5'10"")
+  const heightStr = String(profile.height || "5'10")
   const m = heightStr.match(/(\d+)'(\d+)/)
   const heightCm = m ? Math.round((parseInt(m[1]) * 12 + parseInt(m[2])) * 2.54) : 175
   const weightKg = Math.round(weight * 0.453592)
