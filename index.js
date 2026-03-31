@@ -114,6 +114,24 @@ const chatTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'log_food',
+      description: "Log a food/meal to the user's daily food diary when they confirm they want to add it. Use after analyzing a food photo or when user asks to log a specific food.",
+      parameters: {
+        type: 'object',
+        properties: {
+          food_name: { type: 'string', description: 'Name of the food or meal' },
+          calories: { type: 'number', description: 'Estimated calories' },
+          protein_g: { type: 'number', description: 'Protein in grams' },
+          carbs_g: { type: 'number', description: 'Carbohydrates in grams' },
+          fat_g: { type: 'number', description: 'Fat in grams' },
+        },
+        required: ['food_name', 'calories'],
+      },
+    },
+  },
 ]
 
 // =============================================
@@ -354,6 +372,9 @@ Always respond as their dedicated personal trainer who knows them deeply.`
         } else if (name === 'regenerate_plan') {
           pendingAction.updates.push({ type: 'plan_regenerated', planType: args.plan_type })
           updates.push(`Generate new ${args.plan_type} plan`)
+        } else if (name === 'log_food') {
+          pendingAction.updates.push({ type: 'food_logged', ...args })
+          updates.push(`Log ${args.food_name} (${args.calories} kcal, ${args.protein_g || 0}g protein)`)
         }
       }
 
@@ -453,6 +474,15 @@ app.post('/api/execute-action', async (req, res) => {
         const { error } = await supabase.from('profiles').update(profileUpdates).eq('id', userId)
         if (error) throw new Error(error.message)
         results.push(`Updated: ${Object.keys(profileUpdates).join(', ')}`)
+        // If weight was in the batch, also write to body_composition_logs
+        if (profileUpdates.weight != null) {
+          const todayStr = new Date().toISOString().split('T')[0]
+          await supabase.from('body_composition_logs').upsert({
+            user_id: userId,
+            logged_at: todayStr,
+            weight_lbs: parseFloat(profileUpdates.weight),
+          }, { onConflict: 'user_id,logged_at' })
+        }
       }
       
       // Handle other update types
@@ -480,7 +510,12 @@ app.post('/api/execute-action', async (req, res) => {
         ? `Done! Updated your ${updatedFields[0]}.`
         : `Done! Updated your ${updatedFields.slice(0, -1).join(', ')} and ${updatedFields[updatedFields.length - 1]}.`
       
-      return res.json({ success: true, message })
+      // Extract any food_logged results to return to app
+      const foodLogs = results.filter(r => r.startsWith('food_logged:')).map(r => {
+        try { return JSON.parse(r.replace('food_logged:', '')) } catch { return null }
+      }).filter(Boolean)
+      
+      return res.json({ success: true, message, foodLogs: foodLogs.length > 0 ? foodLogs : undefined })
     }
 
     switch (action.type) {
@@ -503,6 +538,17 @@ app.post('/api/execute-action', async (req, res) => {
         if (!data || data.length === 0) {
           console.error('[execute-action] No rows updated - userId:', userId)
           return res.status(404).json({ error: 'Profile not found for this user' })
+        }
+
+        // If weight updated, also write to body_composition_logs so all screens reflect it
+        if (action.field === 'weight') {
+          const todayStr = new Date().toISOString().split('T')[0]
+          await supabase.from('body_composition_logs').upsert({
+            user_id: userId,
+            logged_at: todayStr,
+            weight_lbs: parseFloat(action.value),
+          }, { onConflict: 'user_id,logged_at' })
+          console.log(`[execute-action] Also wrote weight_lbs=${action.value} to body_composition_logs`)
         }
 
         return res.json({
