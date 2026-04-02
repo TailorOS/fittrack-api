@@ -135,6 +135,52 @@ const chatTools = [
   {
     type: 'function',
     function: {
+      name: 'modify_workout',
+      description: `Modify or customize the user's workout plan. Use when user asks to:
+- Replace an exercise ("swap squats with lunges", "replace bench press")
+- Change sets/reps ("make pull day harder", "reduce volume")
+- Change a workout day split ("change push day to chest and shoulders only")
+- Add or remove exercises from a day
+Always keep changes aligned with their goal and experience level. Warn if change reduces effectiveness.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          day_name: {
+            type: 'string',
+            description: 'Name of the workout day to modify (e.g. "Push Day", "Pull Day", "Leg Day")'
+          },
+          action: {
+            type: 'string',
+            enum: ['replace_exercise', 'add_exercise', 'remove_exercise', 'change_sets_reps', 'rename_day'],
+            description: 'What type of modification to make'
+          },
+          old_exercise_name: {
+            type: 'string',
+            description: 'Name of exercise to replace or remove (for replace_exercise/remove_exercise)'
+          },
+          new_exercise_name: {
+            type: 'string',
+            description: 'Name of the new or added exercise'
+          },
+          muscle_group: {
+            type: 'string',
+            description: 'Primary muscle group for the exercise'
+          },
+          equipment: {
+            type: 'string',
+            description: 'Equipment needed (barbell, dumbbell, bodyweight, cable, machine)'
+          },
+          sets: { type: 'number', description: 'Number of sets' },
+          reps: { type: 'string', description: 'Rep range (e.g. "8-12", "5", "12-15")' },
+          rest_seconds: { type: 'number', description: 'Rest time in seconds' },
+        },
+        required: ['day_name', 'action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'modify_meal',
       description: `Modify or replace a specific meal in the user's current meal plan. Use when user asks to:
 - Replace a meal ("swap my lunch", "replace breakfast with eggs")
@@ -350,6 +396,13 @@ WHEN GIVING ADVICE:
 - If advice conflicts with their goal: say so clearly, give the better alternative
 - If they ask about off-plan food: tell them exactly how it fits with calories and protein remaining
 
+WORKOUT MODIFICATION RULES:
+- If user asks to remove a compound lift (squat, deadlift, bench, row) AND they have a muscle/strength goal → warn: "That's one of your most effective exercises for [goal]. How about reducing sets instead?" Then offer to proceed.
+- If user asks to add an exercise that targets a muscle they already have 3+ exercises for → note it: "You already have 3 back exercises — this would make 4. Good for intensity focus, but watch recovery."
+- If user asks to reduce volume below 2 exercises per day → warn: "That might not be enough stimulus for progress. Minimum 3 exercises keeps results coming."
+- If change FITS their goal well → confirm and explain: "Good add — [exercise] hits [muscle] which supports your [goal] goal directly 💪"
+- Always keep exercise names standard and searchable (e.g. "Barbell Row" not "bent over rows")
+
 ALWAYS add 1-line context after actions:
 - 'This keeps you at Xg protein for today ✅'
 - 'This adds X kcal — you'll be Y kcal over target'
@@ -433,6 +486,16 @@ Always respond as their dedicated personal trainer who knows them deeply.`
           pendingAction.updates.push({ type: 'meal_modified', ...args })
           const mealLabel = args.meal_type.charAt(0).toUpperCase() + args.meal_type.slice(1)
           updates.push(`Replace ${mealLabel}: ${args.meal_name} (${args.calories} kcal, ${args.protein_g}g protein)`)
+        } else if (name === 'modify_workout') {
+          pendingAction.updates.push({ type: 'workout_modified', ...args })
+          const actionLabels = {
+            replace_exercise: `${args.day_name}: Replace ${args.old_exercise_name || 'exercise'} with ${args.new_exercise_name}`,
+            add_exercise: `${args.day_name}: Add ${args.new_exercise_name} (${args.sets || 3}×${args.reps || '10-12'})`,
+            remove_exercise: `${args.day_name}: Remove ${args.old_exercise_name}`,
+            change_sets_reps: `${args.day_name}: Change ${args.old_exercise_name || 'exercise'} to ${args.sets}×${args.reps}`,
+            rename_day: `Rename to ${args.new_exercise_name}`,
+          }
+          updates.push(actionLabels[args.action] || `Modify ${args.day_name}`)
         }
       }
 
@@ -693,6 +756,98 @@ app.post('/api/execute-action', async (req, res) => {
             console.error('[execute-action] meal_modified error:', e.message)
             results.push('meal_modified_error')
           }
+        } else if (update.type === 'workout_modified') {
+          try {
+            // Find active workout plan
+            const { data: workoutPlan } = await supabase
+              .from('workout_plans')
+              .select('id, workout_days(id, day_name, workout_day_exercises(id, order_index, sets, reps, rest_seconds, exercises(id, name, muscle_group, equipment)))')
+              .eq('user_id', userId)
+              .eq('is_active', true)
+              .single()
+
+            if (workoutPlan) {
+              // Find the matching workout day
+              const targetDay = workoutPlan.workout_days?.find(d =>
+                d.day_name?.toLowerCase().includes(update.day_name?.toLowerCase()) ||
+                update.day_name?.toLowerCase().includes(d.day_name?.toLowerCase().split(' ')[0])
+              )
+
+              if (targetDay) {
+                if (update.action === 'replace_exercise' && update.old_exercise_name && update.new_exercise_name) {
+                  // Find or create the new exercise
+                  let { data: newEx } = await supabase.from('exercises').select('id').ilike('name', `%${update.new_exercise_name}%`).limit(1).single()
+                  if (!newEx) {
+                    const { data: created } = await supabase.from('exercises').insert({
+                      name: update.new_exercise_name,
+                      muscle_group: update.muscle_group || 'general',
+                      equipment: update.equipment || 'bodyweight',
+                    }).select().single()
+                    newEx = created
+                  }
+                  if (newEx) {
+                    // Find the workout_day_exercise to update
+                    const targetEx = targetDay.workout_day_exercises?.find(e =>
+                      e.exercises?.name?.toLowerCase().includes(update.old_exercise_name.toLowerCase())
+                    )
+                    if (targetEx) {
+                      await supabase.from('workout_day_exercises').update({
+                        exercise_id: newEx.id,
+                        sets: update.sets || targetEx.sets,
+                        reps: update.reps || targetEx.reps,
+                        rest_seconds: update.rest_seconds || targetEx.rest_seconds,
+                      }).eq('id', targetEx.id)
+                      results.push('workout_modified:replaced ' + update.old_exercise_name + ' with ' + update.new_exercise_name + ' on ' + update.day_name)
+                    }
+                  }
+                } else if (update.action === 'add_exercise' && update.new_exercise_name) {
+                  let { data: newEx } = await supabase.from('exercises').select('id').ilike('name', `%${update.new_exercise_name}%`).limit(1).single()
+                  if (!newEx) {
+                    const { data: created } = await supabase.from('exercises').insert({
+                      name: update.new_exercise_name,
+                      muscle_group: update.muscle_group || 'general',
+                      equipment: update.equipment || 'bodyweight',
+                    }).select().single()
+                    newEx = created
+                  }
+                  if (newEx) {
+                    const maxOrder = Math.max(0, ...(targetDay.workout_day_exercises?.map(e => e.order_index) || [0]))
+                    await supabase.from('workout_day_exercises').insert({
+                      workout_day_id: targetDay.id,
+                      exercise_id: newEx.id,
+                      order_index: maxOrder + 1,
+                      sets: update.sets || 3,
+                      reps: update.reps || '10-12',
+                      rest_seconds: update.rest_seconds || 90,
+                    })
+                    results.push('workout_modified:added ' + update.new_exercise_name + ' to ' + update.day_name)
+                  }
+                } else if (update.action === 'remove_exercise' && update.old_exercise_name) {
+                  const targetEx = targetDay.workout_day_exercises?.find(e =>
+                    e.exercises?.name?.toLowerCase().includes(update.old_exercise_name.toLowerCase())
+                  )
+                  if (targetEx) {
+                    await supabase.from('workout_day_exercises').delete().eq('id', targetEx.id)
+                    results.push('workout_modified:removed ' + update.old_exercise_name + ' from ' + update.day_name)
+                  }
+                } else if (update.action === 'change_sets_reps' && update.old_exercise_name) {
+                  const targetEx = targetDay.workout_day_exercises?.find(e =>
+                    e.exercises?.name?.toLowerCase().includes(update.old_exercise_name.toLowerCase())
+                  )
+                  if (targetEx) {
+                    await supabase.from('workout_day_exercises').update({
+                      sets: update.sets || targetEx.sets,
+                      reps: update.reps || targetEx.reps,
+                    }).eq('id', targetEx.id)
+                    results.push('workout_modified:updated sets/reps for ' + update.old_exercise_name)
+                  }
+                }
+                console.log('[execute-action] workout_modified: ' + update.action + ' on ' + update.day_name)
+              }
+            }
+          } catch (e) {
+            console.error('[execute-action] workout_modified error:', e.message)
+          }
         } else if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
           if (update.weight != null) {
@@ -745,11 +900,13 @@ app.post('/api/execute-action', async (req, res) => {
       }).filter(Boolean)
       
       const mealMods = mealModResults.map(r => { try { return JSON.parse(r.replace('meal_modified:', '')) } catch { return null } }).filter(Boolean)
+      const workoutMods = results.filter(r => r.startsWith('workout_modified:'))
       return res.json({ 
         success: true, 
         message, 
         foodLogs: foodLogs.length > 0 ? foodLogs : undefined,
         mealModified: mealMods.length > 0 ? mealMods : undefined,
+        workoutModified: workoutMods.length > 0 ? true : undefined,
       })
     }
 
