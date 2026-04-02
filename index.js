@@ -772,12 +772,12 @@ app.post('/api/execute-action', async (req, res) => {
                 }
 
                 // Also clear today's confirmed status for this meal type (since it's been replaced)
-                const todayStr = new Date().toISOString().split('T')[0]
+                // Use userTodayStr (user's local date) not server UTC
                 const { data: nutritionLog } = await supabase
                   .from('daily_nutrition_logs')
                   .select('confirmed_meal_ids')
                   .eq('user_id', userId)
-                  .eq('logged_date', todayStr)
+                  .eq('logged_date', userTodayStr)
                   .single()
 
                 if (nutritionLog && targetMeal) {
@@ -786,7 +786,7 @@ app.post('/api/execute-action', async (req, res) => {
                     .from('daily_nutrition_logs')
                     .update({ confirmed_meal_ids: filtered })
                     .eq('user_id', userId)
-                    .eq('logged_date', todayStr)
+                    .eq('logged_date', userTodayStr)
                 }
 
                 results.push(`meal_modified:${JSON.stringify({ meal_type: update.meal_type, meal_name: update.meal_name, calories: update.calories, protein_g: update.protein_g })}`)
