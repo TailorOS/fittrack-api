@@ -307,6 +307,45 @@ app.post('/api/chat', async (req, res) => {
     const ts = p.todayStats || {}
     const name = p.name || 'there'
     
+    // Fetch current plan info so AI knows what user already has
+    let currentPlanContext = ''
+    try {
+      const [mealPlanRes, workoutPlanRes] = await Promise.all([
+        supabase.from('meal_plans')
+          .select('name, daily_calorie_target, daily_protein_target, meal_plan_days(day_number, meals(meal_type, name, calories, protein_g))')
+          .eq('user_id', userId)
+          .eq('is_active', true)
+          .single(),
+        supabase.from('workout_plans')
+          .select('name, workout_days(day_name, day_number, workout_day_exercises(sets, reps, exercises(name, muscle_group)))')
+          .eq('user_id', userId)
+          .eq('is_active', true)
+          .single()
+      ])
+      
+      if (mealPlanRes.data) {
+        const mp = mealPlanRes.data
+        const todayDayNum = new Date(req.body?.todayStr ? req.body.todayStr + 'T12:00:00Z' : Date.now()).getUTCDay() || 7
+        const todayMeals = mp.meal_plan_days?.find(d => d.day_number === todayDayNum)?.meals || []
+        currentPlanContext += `
+CURRENT MEAL PLAN: "${mp.name}" (${mp.daily_calorie_target} kcal, ${mp.daily_protein_target}g protein target)
+Today's meals: ${todayMeals.map(m => `${m.meal_type}: ${m.name} (${m.calories} kcal, ${m.protein_g}g protein)`).join(' | ')}
+`
+      }
+      
+      if (workoutPlanRes.data) {
+        const wp = workoutPlanRes.data
+        const todayDayNum2 = new Date(req.body?.todayStr ? req.body.todayStr + 'T12:00:00Z' : Date.now()).getUTCDay() || 7
+        const todayWorkout = wp.workout_days?.find(d => d.day_number === todayDayNum2)
+        currentPlanContext += `
+CURRENT WORKOUT PLAN: "${wp.name}"
+Today's workout: ${todayWorkout ? `${todayWorkout.day_name} — ${todayWorkout.workout_day_exercises?.map(e => e.exercises?.name + ' ' + e.sets + 'x' + e.reps).join(', ')}` : 'Rest day'}
+`
+      }
+    } catch (e) {
+      console.log('[chat] Could not fetch plan context:', e.message)
+    }
+    
     // Build today's summary string from live data
     const todaySummary = ts.calTarget ? `
 TODAY'S LIVE DATA (real-time, use these exact numbers when asked):
@@ -328,6 +367,7 @@ CLIENT PROFILE:
 - Protein target from plan: ${ts.proteinTarget ? ts.proteinTarget + 'g/day' : 'see profile weight × 1g/lb'}
 - Calorie target from plan: ${ts.calTarget ? ts.calTarget + ' kcal/day' : 'calculated from TDEE'}
 ${todaySummary}
+${currentPlanContext}
 
 YOUR CAPABILITIES:
 1. Give workout advice tailored to their experience, goal, and available equipment (home or gym)
