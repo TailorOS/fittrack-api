@@ -597,8 +597,12 @@ app.post('/api/execute-action', async (req, res) => {
               .single()
 
             if (mealPlan) {
-              // Find today's plan day
-              const todayDayNum = new Date().getDay() === 0 ? 7 : new Date().getDay()
+              // Use todayStr from request body (user's local timezone) not server UTC
+              // Server is UTC — user may be in a different day entirely
+              const userTodayStr = req.body?.todayStr || new Date().toISOString().split('T')[0]
+              const userDate = new Date(userTodayStr + 'T12:00:00Z') // noon UTC to avoid edge cases
+              const todayDayNum = userDate.getUTCDay() === 0 ? 7 : userDate.getUTCDay()
+              console.log(`[modify_meal] User today: ${userTodayStr}, dayNum: ${todayDayNum}`)
               const todayDay = mealPlan.meal_plan_days?.find(d => d.day_number === todayDayNum)
 
               if (todayDay) {
