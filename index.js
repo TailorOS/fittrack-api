@@ -912,6 +912,95 @@ app.post('/api/generate-plan', async (req, res) => {
 // =============================================
 // CORE PLAN GENERATION LOGIC
 // =============================================
+// Fetch real usage context for smarter plan generation
+async function getUserUsageContext(userId) {
+  try {
+    const sevenDaysAgo = new Date()
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+    const sevenDaysStr = sevenDaysAgo.toISOString().split('T')[0]
+
+    const [nutritionLogs, bodyCompLogs, workoutSessions, currentMeals] = await Promise.all([
+      // Last 7 days of nutrition logs
+      supabase.from('daily_nutrition_logs')
+        .select('logged_date, total_calories, total_protein_g, followed_plan')
+        .eq('user_id', userId)
+        .gte('logged_date', sevenDaysStr)
+        .order('logged_date', { ascending: false }),
+
+      // Last 3 body comp logs (weight trend)
+      supabase.from('body_composition_logs')
+        .select('logged_at, weight_lbs, body_fat_pct')
+        .eq('user_id', userId)
+        .order('logged_at', { ascending: false })
+        .limit(3),
+
+      // Workout sessions this week
+      supabase.from('workout_sessions')
+        .select('started_at, completed_at')
+        .eq('user_id', userId)
+        .gte('started_at', sevenDaysStr),
+
+      // Current active meal plan meals (to avoid repeating)
+      supabase.from('meal_plans')
+        .select('name, daily_calorie_target, daily_protein_target, meal_plan_days(meals(name, meal_type, calories, protein_g))')
+        .eq('user_id', userId)
+        .eq('is_active', true)
+        .single()
+    ])
+
+    const logs = nutritionLogs.data || []
+    const bodyLogs = bodyCompLogs.data || []
+    const sessions = workoutSessions.data || []
+    const currentPlan = currentMeals.data
+
+    // Calculate averages
+    const logsWithData = logs.filter(l => l.total_calories > 0)
+    const avgCalories = logsWithData.length
+      ? Math.round(logsWithData.reduce((s, l) => s + (l.total_calories || 0), 0) / logsWithData.length)
+      : null
+    const avgProtein = logsWithData.length
+      ? Math.round(logsWithData.reduce((s, l) => s + (l.total_protein_g || 0), 0) / logsWithData.length)
+      : null
+    const followedPlanDays = logs.filter(l => l.followed_plan).length
+    const loggedDays = logs.length
+
+    // Weight trend
+    const latestWeight = bodyLogs[0]?.weight_lbs
+    const oldestWeight = bodyLogs[bodyLogs.length - 1]?.weight_lbs
+    const weightTrend = latestWeight && oldestWeight && latestWeight !== oldestWeight
+      ? (latestWeight - oldestWeight > 0 ? 'gaining' : 'losing')
+      : 'stable'
+
+    // Current meal names (to avoid exact repeats)
+    const currentMealNames = []
+    if (currentPlan?.meal_plan_days) {
+      for (const day of currentPlan.meal_plan_days.slice(0, 2)) {
+        for (const meal of (day.meals || [])) {
+          if (meal.name && !currentMealNames.includes(meal.name)) {
+            currentMealNames.push(meal.name)
+          }
+        }
+      }
+    }
+
+    return {
+      avgCalories,
+      avgProtein,
+      followedPlanDays,
+      loggedDays,
+      workoutsThisWeek: sessions.length,
+      weightTrend,
+      latestWeight,
+      currentMealNames: currentMealNames.slice(0, 8), // top 8 to avoid repeats
+      currentPlanCalTarget: currentPlan?.daily_calorie_target,
+      currentPlanProteinTarget: currentPlan?.daily_protein_target,
+    }
+  } catch (e) {
+    console.log('[getUserUsageContext] error:', e.message)
+    return {}
+  }
+}
+
 async function generateAndSavePlan(userId, profile, planType) {
   const {
     full_name, age, gender, weight, height,
@@ -920,6 +1009,10 @@ async function generateAndSavePlan(userId, profile, planType) {
   } = profile
 
   const trainingDays = training_days_per_week || 4
+
+  // Fetch real usage data for smarter, data-driven plan
+  const usageCtx = await getUserUsageContext(userId)
+  console.log('[generate-plan] Usage context:', JSON.stringify(usageCtx))
 
   // Fetch available exercises from Supabase
   const { data: availableExercises } = await supabase
@@ -975,6 +1068,26 @@ async function generateAndSavePlan(userId, profile, planType) {
   const remainingCals = targetCalories - proteinCals
   const fatG = Math.round((remainingCals * 0.30) / 9)  // 30% of remaining from fat
   const carbsG = Math.round((remainingCals * 0.70) / 4) // 70% of remaining from carbs
+
+  // Build usage context block for the prompt
+  const usageContextBlock = usageCtx.avgCalories || usageCtx.avgProtein ? `
+REAL USER BEHAVIOR DATA (last 7 days — use this to make the plan realistic):
+${usageCtx.avgCalories ? `- Average daily calories actually consumed: ${usageCtx.avgCalories} kcal` : ''}
+${usageCtx.avgProtein ? `- Average daily protein actually consumed: ${usageCtx.avgProtein}g` : ''}
+${usageCtx.loggedDays ? `- Days with nutrition data: ${usageCtx.loggedDays}/7` : ''}
+${usageCtx.followedPlanDays ? `- Days they followed their meal plan: ${usageCtx.followedPlanDays}/${usageCtx.loggedDays}` : ''}
+${usageCtx.workoutsThisWeek !== undefined ? `- Workouts completed this week: ${usageCtx.workoutsThisWeek}` : ''}
+${usageCtx.weightTrend ? `- Weight trend: ${usageCtx.weightTrend} (latest: ${usageCtx.latestWeight ? usageCtx.latestWeight + ' lbs' : 'unknown'})` : ''}
+${usageCtx.currentMealNames?.length ? `- Current plan meals (DO NOT repeat these, create variety): ${usageCtx.currentMealNames.join(', ')}` : ''}
+
+USE THIS DATA TO:
+- If avg protein < target: increase protein in every meal, use higher-protein sources
+- If avg calories < target by >200: meals may be too large/complex — simplify portions
+- If followed plan < 3 days: meals may be too complex — make them simpler and faster to prepare
+- If weight is gaining and goal is lose_fat: reduce calories by additional 100 kcal
+- If weight is losing fast (>2 lbs/week): increase calories slightly to protect muscle
+- Always create variety — never repeat meals from the current plan
+` : ''
 
   const tdeeInstructions = `
 PRE-CALCULATED NUTRITION TARGETS (use these EXACT numbers — do not recalculate):
@@ -1072,7 +1185,8 @@ ${generateMeal ? `- Calculate dailyCalorieTarget and dailyProteinTarget using th
 - Meal names must clearly reflect the cuisine (e.g. "Dal Tadka with Jeera Rice" not "Lentil Soup")
 - CRITICAL: Each day's 3 meals MUST sum to EXACTLY the dailyProteinTarget (+/- 5g) and dailyCalorieTarget (+/- 50 kcal). Verify your math before responding. If meals add up to less, increase protein amounts.
 - High-protein meal sources to use: chicken/fish curry (25-35g protein per serving), dal makhani (18g/cup), paneer dishes (14g/100g), egg dishes (6g/egg), Greek yogurt (17g/cup)
-- Meal instructions must be ONE specific sentence with exact portions and key macros, e.g. '150g chicken breast + 1 cup basmati rice + 2 tbsp dal (~35g protein, 450 kcal)'` : ''}`
+- Meal instructions must be ONE specific sentence with exact portions and key macros, e.g. '150g chicken breast + 1 cup basmati rice + 2 tbsp dal (~35g protein, 450 kcal)'
+${generateMeal && usageCtx.avgCalories ? usageContextBlock : ''}` : ''}`
 
   console.log(`[generate-plan] Sending prompt to GPT-4o (planType: ${planType})`)
   const completion = await openai.chat.completions.create({
