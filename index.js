@@ -729,7 +729,9 @@ app.post('/api/execute-action', async (req, res) => {
               const userDate = new Date(userTodayStr + 'T12:00:00Z') // noon UTC to avoid edge cases
               const todayDayNum = userDate.getUTCDay() === 0 ? 7 : userDate.getUTCDay()
               console.log(`[modify_meal] User today: ${userTodayStr}, dayNum: ${todayDayNum}`)
+              console.log(`[modify_meal] Available days:`, mealPlan.meal_plan_days?.map(d => d.day_number).join(','))
               const todayDay = mealPlan.meal_plan_days?.find(d => d.day_number === todayDayNum)
+              console.log(`[modify_meal] Found todayDay:`, todayDay ? `day_number=${todayDay.day_number}` : 'NOT FOUND')
 
               if (todayDay) {
                 // Find the meal with matching meal_type
