@@ -811,14 +811,22 @@ app.post('/api/execute-action', async (req, res) => {
             // Find active workout plan
             const { data: workoutPlan } = await supabase
               .from('workout_plans')
-              .select('id, workout_days(id, day_name, workout_day_exercises(id, order_index, sets, reps, rest_seconds, exercises(id, name, muscle_group, equipment)))')
+              .select('id, workout_days(id, day_name, day_number, workout_day_exercises(id, order_index, sets, reps, rest_seconds, exercises(id, name, muscle_group, equipment)))')
               .eq('user_id', userId)
               .eq('is_active', true)
               .single()
 
             if (workoutPlan) {
-              // Find the matching workout day
+              // Use user's local date (not server UTC) to find today's workout day
+              const wUserTodayStr = req.body?.todayStr || new Date().toISOString().split('T')[0]
+              const wUserDate = new Date(wUserTodayStr + 'T12:00:00Z')
+              const wTodayDayNum = wUserDate.getUTCDay() === 0 ? 7 : wUserDate.getUTCDay()
+              console.log('[modify_workout] User today:', wUserTodayStr, 'dayNum:', wTodayDayNum)
+
+              // Find the matching workout day by name OR by today's day number
               const targetDay = workoutPlan.workout_days?.find(d =>
+                d.day_number === wTodayDayNum
+              ) || workoutPlan.workout_days?.find(d =>
                 d.day_name?.toLowerCase().includes(update.day_name?.toLowerCase()) ||
                 update.day_name?.toLowerCase().includes(d.day_name?.toLowerCase().split(' ')[0])
               )
