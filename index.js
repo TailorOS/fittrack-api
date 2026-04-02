@@ -888,6 +888,41 @@ app.post('/api/execute-action', async (req, res) => {
           } catch (e) {
             console.error('[execute-action] workout_modified error:', e.message)
           }
+        } else if (update.type === 'plan_regenerated') {
+          // Handle plan regeneration inside batch update
+          const planType = update.planType || 'meal'
+          console.log(`[execute-action] Batch plan_regenerated: ${planType} for userId:`, userId)
+          
+          const { data: profileForPlan } = await supabase.from('profiles').select('*').eq('id', userId).single()
+          if (profileForPlan) {
+            // Apply fallbacks
+            profileForPlan.age = profileForPlan.age || 25
+            profileForPlan.gender = profileForPlan.gender || 'male'
+            profileForPlan.weight = profileForPlan.weight || 150
+            profileForPlan.height = profileForPlan.height || '5ft10'
+            profileForPlan.activity_level = profileForPlan.activity_level || 'moderately_active'
+            profileForPlan.diet_type = profileForPlan.diet_type || 'balanced'
+            profileForPlan.experience_level = profileForPlan.experience_level || 'intermediate'
+            profileForPlan.training_days_per_week = profileForPlan.training_days_per_week || 4
+            profileForPlan.goal = profileForPlan.goal || 'lean muscle'
+            profileForPlan.full_name = profileForPlan.full_name || 'there'
+            
+            // Apply any preference from chat message
+            const chatMsg = (req.body?.lastUserMessage || '').toLowerCase()
+            if (chatMsg.includes('vegetarian') || chatMsg.includes('veg only')) profileForPlan.diet_type = 'vegetarian'
+            if (chatMsg.includes('vegan')) profileForPlan.diet_type = 'vegan'
+            
+            // Deactivate current plan
+            if (planType === 'workout' || planType === 'both') {
+              await supabase.from('workout_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+            }
+            if (planType === 'meal' || planType === 'both') {
+              await supabase.from('meal_plans').update({ is_active: false }).eq('user_id', userId).eq('is_active', true)
+            }
+            
+            await generateAndSavePlan(userId, profileForPlan, planType)
+            results.push(`plan_regenerated:${planType}`)
+          }
         } else if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
           if (update.weight != null) {
