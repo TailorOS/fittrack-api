@@ -132,6 +132,35 @@ const chatTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'modify_meal',
+      description: `Modify or replace a specific meal in the user's current meal plan. Use when user asks to:
+- Replace a meal ("swap my lunch", "replace breakfast with eggs")
+- Customize a meal ("change dinner to chicken rice")
+- Make a meal higher/lower protein/calorie
+- Remove eggs, dairy, or specific ingredients from a meal
+Always estimate accurate macros. Keep total daily calories close to their target.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          meal_type: {
+            type: 'string',
+            enum: ['breakfast', 'lunch', 'dinner', 'snack'],
+            description: 'Which meal to replace'
+          },
+          meal_name: { type: 'string', description: 'New meal name' },
+          calories: { type: 'number', description: 'Calories for this meal' },
+          protein_g: { type: 'number', description: 'Protein in grams' },
+          carbs_g: { type: 'number', description: 'Carbs in grams' },
+          fat_g: { type: 'number', description: 'Fat in grams' },
+          instructions: { type: 'string', description: 'One-sentence preparation instruction with exact portions' },
+        },
+        required: ['meal_type', 'meal_name', 'calories', 'protein_g'],
+      },
+    },
+  },
 ]
 
 // =============================================
@@ -377,6 +406,10 @@ Always respond as their dedicated personal trainer who knows them deeply.`
         } else if (name === 'log_food') {
           pendingAction.updates.push({ type: 'food_logged', ...args })
           updates.push(`Log ${args.food_name} (${args.calories} kcal, ${args.protein_g || 0}g protein)`)
+        } else if (name === 'modify_meal') {
+          pendingAction.updates.push({ type: 'meal_modified', ...args })
+          const mealLabel = args.meal_type.charAt(0).toUpperCase() + args.meal_type.slice(1)
+          updates.push(`Replace ${mealLabel}: ${args.meal_name} (${args.calories} kcal, ${args.protein_g}g protein)`)
         }
       }
 
@@ -552,6 +585,87 @@ app.post('/api/execute-action', async (req, res) => {
             carbs_g: update.carbs_g || 0,
             fat_g: update.fat_g || 0,
           })}`)
+        } else if (update.type === 'meal_modified') {
+          // Update the meal in Supabase meal_plan_days/meals tables
+          try {
+            // Find active meal plan
+            const { data: mealPlan } = await supabase
+              .from('meal_plans')
+              .select('id, meal_plan_days(id, day_number, meals(id, meal_type, name))')
+              .eq('user_id', userId)
+              .eq('is_active', true)
+              .single()
+
+            if (mealPlan) {
+              // Find today's plan day
+              const todayDayNum = new Date().getDay() === 0 ? 7 : new Date().getDay()
+              const todayDay = mealPlan.meal_plan_days?.find(d => d.day_number === todayDayNum)
+
+              if (todayDay) {
+                // Find the meal with matching meal_type
+                const targetMeal = todayDay.meals?.find(m =>
+                  m.meal_type?.toLowerCase() === update.meal_type?.toLowerCase()
+                )
+
+                if (targetMeal) {
+                  // Update existing meal
+                  const { error: updateErr } = await supabase
+                    .from('meals')
+                    .update({
+                      name: update.meal_name,
+                      calories: Math.round(update.calories),
+                      protein_g: Math.round(update.protein_g || 0),
+                      carbs_g: Math.round(update.carbs_g || 0),
+                      fat_g: Math.round(update.fat_g || 0),
+                      instructions: update.instructions || '',
+                    })
+                    .eq('id', targetMeal.id)
+
+                  if (updateErr) throw new Error(updateErr.message)
+                  console.log(`[execute-action] Updated meal ${targetMeal.id}: ${update.meal_name}`)
+                } else {
+                  // No matching meal type — insert new one
+                  const { error: insertErr } = await supabase
+                    .from('meals')
+                    .insert({
+                      plan_day_id: todayDay.id,
+                      meal_type: update.meal_type,
+                      name: update.meal_name,
+                      calories: Math.round(update.calories),
+                      protein_g: Math.round(update.protein_g || 0),
+                      carbs_g: Math.round(update.carbs_g || 0),
+                      fat_g: Math.round(update.fat_g || 0),
+                      instructions: update.instructions || '',
+                    })
+                  if (insertErr) throw new Error(insertErr.message)
+                  console.log(`[execute-action] Inserted new ${update.meal_type} meal for today`)
+                }
+
+                // Also clear today's confirmed status for this meal type (since it's been replaced)
+                const todayStr = new Date().toISOString().split('T')[0]
+                const { data: nutritionLog } = await supabase
+                  .from('daily_nutrition_logs')
+                  .select('confirmed_meal_ids')
+                  .eq('user_id', userId)
+                  .eq('logged_date', todayStr)
+                  .single()
+
+                if (nutritionLog && targetMeal) {
+                  const filtered = (nutritionLog.confirmed_meal_ids || []).filter(id => id !== targetMeal.id)
+                  await supabase
+                    .from('daily_nutrition_logs')
+                    .update({ confirmed_meal_ids: filtered })
+                    .eq('user_id', userId)
+                    .eq('logged_date', todayStr)
+                }
+
+                results.push(`meal_modified:${JSON.stringify({ meal_type: update.meal_type, meal_name: update.meal_name, calories: update.calories, protein_g: update.protein_g })}`)
+              }
+            }
+          } catch (e) {
+            console.error('[execute-action] meal_modified error:', e.message)
+            results.push('meal_modified_error')
+          }
         } else if (update.type === 'composition_logged') {
           const logData = { user_id: userId, logged_at: new Date().toISOString() }
           if (update.weight != null) {
@@ -575,8 +689,9 @@ app.post('/api/execute-action', async (req, res) => {
       // Build appropriate success message
       const foodLogResults = results.filter(r => r.startsWith('food_logged:'))
       let message
-      if (foodLogResults.length > 0 && updatedFields.length === 0) {
-        // Only food was logged
+      const mealModResults = results.filter(r => r.startsWith('meal_modified:'))
+      
+      if (foodLogResults.length > 0 && updatedFields.length === 0 && mealModResults.length === 0) {
         const foods = foodLogResults.map(r => { try { return JSON.parse(r.replace('food_logged:', '')).food_name } catch { return 'food' } })
         message = `Logged ${foods.join(', ')} to your food diary! 🍽️`
       } else if (updatedFields.length === 1) {
@@ -602,7 +717,13 @@ app.post('/api/execute-action', async (req, res) => {
         try { return JSON.parse(r.replace('food_logged:', '')) } catch { return null }
       }).filter(Boolean)
       
-      return res.json({ success: true, message, foodLogs: foodLogs.length > 0 ? foodLogs : undefined })
+      const mealMods = mealModResults.map(r => { try { return JSON.parse(r.replace('meal_modified:', '')) } catch { return null } }).filter(Boolean)
+      return res.json({ 
+        success: true, 
+        message, 
+        foodLogs: foodLogs.length > 0 ? foodLogs : undefined,
+        mealModified: mealMods.length > 0 ? mealMods : undefined,
+      })
     }
 
     switch (action.type) {
